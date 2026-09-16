@@ -4,6 +4,13 @@ A Home Assistant custom integration for managing Docker Compose stacks —
 compose-first rather than container-first, a bit like a lightweight
 Portainer replacement that lives inside HA itself.
 
+**This is built for Home Assistant Container (HA running as a Docker
+container) managing Docker Compose stacks on the same host** — that's
+the setup this integration is designed, tested, and documented against.
+HA OS/Supervised installs aren't the primary target (see
+[Prerequisites](#prerequisites) for the caveats if you want to try it
+anyway).
+
 Point it at a folder of stack subdirectories (each with its own
 `docker-compose.yml`/`compose.yaml`) and it discovers them, then exposes
 per-stack and per-service entities for:
@@ -71,12 +78,16 @@ supporting infrastructure that you deploy alongside it:
 - **A sidecar container** with the real `docker`/`docker compose`
   binaries, mounting your stacks root at the *identical* absolute path as
   the host. This integration execs into it to actually run compose
-  commands.
-- **`docker-socket-proxy`**, the only component with direct (read-only)
-  access to `/var/run/docker.sock`, exposing a filtered, allow-list-only
-  subset of the Docker Engine API over plain TCP — bound to localhost
-  only. Both the sidecar and Home Assistant itself talk to Docker through
-  this proxy, never via a direct socket mount.
+  commands. The example deploy below uses the official
+  [`docker:cli`](https://hub.docker.com/_/docker) image (the `cli` tag —
+  just the Docker/Compose CLI binaries, no daemon), but any image with
+  both binaries on `PATH` works.
+- **[`docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy)**
+  (`tecnativa/docker-socket-proxy`), the only component with direct
+  (read-only) access to `/var/run/docker.sock`, exposing a filtered,
+  allow-list-only subset of the Docker Engine API over plain TCP — bound
+  to localhost only. Both the sidecar and Home Assistant itself talk to
+  Docker through this proxy, never via a direct socket mount.
 
 If you're running HA in Docker yourself, see
 [`docs/deploy/`](docs/deploy/) for a full worked example (two
@@ -86,13 +97,48 @@ the same sidecar + proxy pattern still applies — you'll need to run those
 two containers yourself since HA OS doesn't manage arbitrary Docker
 Compose stacks itself.
 
+## Polling
+
+Four independent poll cycles, each on the cadence its own data actually
+needs — none of them block or wait on each other:
+
+| What | Default interval | Configurable? | Scope |
+|---|---|---|---|
+| Live container state/stats (CPU, memory, uptime, running state) | 15s | Yes — the "Poll interval" setup field, 5s minimum | Every discovered stack |
+| Digest-based update availability (`update_available`) | 1h | No | Running stacks only |
+| Registry tag-list walk (`latest_registry_tag`, `pull_target_version`) | 48h full sweep | No | Running stacks only |
+| GitHub release lookup + local version detection (`latest_github_release`, `detected_version`) | 12h | No | Every discovered stack, running or not |
+
+The registry tag-list walk is deliberately the slowest and least
+frequent: fetching a project's *entire* published tag history is real,
+non-trivial registry traffic — confirmed in practice at 29 paginated
+requests for one image with a large tag history (2,890+ tags). Running
+that on anything close to the 1-hour digest-check cadence would multiply
+registry load for data that rarely changes.
+
+To stay responsive despite that slow cadence, the digest check itself
+triggers an immediate, but *stack-scoped* (not repo-wide), tag-list
+walk the moment a service's `update_available` flips from off to on —
+the one moment "what's the newest tag, and does it match what I'd
+actually get" becomes worth knowing. The scheduled 48-hour sweep still
+runs on top of that, as a backstop for the rarer case where a stack is
+already outdated and its newest available tag changes again while still
+outdated.
+
+Pressing **Check for Update (Registry)** on a stack bypasses every
+interval above at once — it forces an immediate digest check *and* tag
+walk for that stack, regardless of staleness, at the cost of the full
+per-tag registry traffic the scheduled sweep normally avoids.
+
 ## Example dashboard
 
-An example Lovelace dashboard (per-stack cards with conditional show/hide
-via a helper entity) is planned for [`docs/dashboard-examples/`](docs/dashboard-examples/)
-but not included in this initial publish — see that directory for what it
-will need (an `input_text.selected_stack` helper entity, plus the
-`auto-entities`, `button-card`, and `card_mod` HACS frontend cards).
+[`docs/dashboard-examples/`](docs/dashboard-examples/) has an example
+Lovelace dashboard: a stack overview grid plus a detail panel for
+whichever stack is selected. It needs an `input_text.selected_stack`
+helper entity and two HACS frontend cards
+([auto-entities](https://github.com/thomasloven/lovelace-auto-entities),
+[button-card](https://github.com/custom-cards/button-card)) — see that
+directory's own README for the details and a screenshot.
 
 Every per-service entity already exposes plain `stack`/`service`
 attributes specifically to support a dashboard like this without any

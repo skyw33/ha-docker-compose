@@ -1,18 +1,22 @@
 # Dashboard examples
 
-An example Lovelace dashboard for this integration (per-stack cards with
-conditional show/hide via a helper entity) is planned for this directory
-but not yet included in this initial publish.
+[`docker_stacks_v3.yaml`](docker_stacks_v3.yaml) — an example Lovelace
+dashboard for this integration: a stack overview grid plus a detail panel
+for whichever stack is selected, showing its containers, current/pull
+target/registry/GitHub-release versions, and compose config.
 
-It will depend on:
+![Dashboard screenshot](dashboard.png)
 
-- `input_text.selected_stack` — a helper entity used to drive which
-  stack's cards are shown.
-- Three HACS frontend cards: [auto-entities](https://github.com/thomasloven/lovelace-auto-entities),
-  [button-card](https://github.com/custom-cards/button-card), and
-  [card_mod](https://github.com/thomasloven/lovelace-card-mod).
+It depends on:
 
-Every per-service entity in this integration exposes plain `stack` and
-`service` attributes specifically to support a dashboard like this —
-conditional cards can compare against `state_attr(entity_id, 'stack')`
-directly, with no need to parse `entity_id` strings.
+- `input_text.selected_stack` — a helper entity that drives which
+  stack's detail panel is shown; clicking a stack card sets it.
+- Two HACS frontend cards:
+  [auto-entities](https://github.com/thomasloven/lovelace-auto-entities)
+  and [button-card](https://github.com/custom-cards/button-card).
+
+The dashboard contains no hardcoded stack/service names — every card is
+generated dynamically from `auto-entities` filters, so it adapts
+automatically as stacks are added or removed. Selection matching is done
+via the `stack`/`service` attributes every per-service entity in this
+integration exposes, not by parsing `entity_id` strings.

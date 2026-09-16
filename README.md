@@ -142,7 +142,8 @@ directory's own README for the details and a screenshot.
 
 Every per-service entity already exposes plain `stack`/`service`
 attributes specifically to support a dashboard like this without any
-`entity_id` string-parsing.
+`entity_id` string-parsing.<img width="1076" height="569" alt="dashboard" src="https://github.com/user-attachments/assets/d58ba5a9-acc5-4f03-b70c-f06f799104f6" />
+
 
 ## Known limitations
 

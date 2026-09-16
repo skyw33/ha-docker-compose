@@ -1,0 +1,21 @@
+# Home Assistant's own stack — deliberately ordinary and unprotected: the
+# fallback if you ever need to stop/recreate it from outside HA is the
+# same CLI access already used for docker-infra and every manual compose
+# edit, not a new failure mode. Full switch, full restart button, full
+# pull-update button — no label, no special handling.
+#
+# Talks to docker-socket-proxy over the host loopback address
+# (tcp://127.0.0.1:2375, set as this integration's "Docker host address"
+# config value) since it runs with network_mode: host and can't reach
+# docker-infra's bridge network by service name the way docker-cli can.
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /path/to/ha_config:/config
+      # No docker.sock mount — talks to the proxy over TCP instead.
+    environment:
+      - TZ=America/Los_Angeles

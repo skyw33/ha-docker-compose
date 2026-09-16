@@ -1,0 +1,56 @@
+# The self-referential infrastructure stack. docker-cli (the sidecar) is
+# what this integration Docker-execs into to run every `docker compose`
+# command it issues — including any command that would target its own
+# container or its network-sibling docker-socket-proxy. A stop or pull
+# issued by the very process being stopped/recreated is a real race
+# condition with no safe general fix, so both services are labeled
+# protection=full: the integration will not create a switch or
+# restart/pull button for either one. It still reports their live state,
+# stats, and update-availability normally — protection only restricts
+# actions, never visibility.
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: docker_socket_proxy
+    labels:
+      - "ha_docker_compose.protection=full"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - EXEC=1
+      - IMAGES=1
+      - POST=1
+      # All other endpoint groups default to 0/disabled unless added here
+      # later. See ../../README.md before widening this list.
+    ports:
+      - "127.0.0.1:2375:2375"
+      # Bound to localhost only — do not expose this on the LAN or any
+      # external interface. The homeassistant stack reaches it via host
+      # loopback since it runs with network_mode: host.
+    restart: unless-stopped
+    networks:
+      - docker-proxy-net
+
+  docker-cli:
+    image: docker:cli
+    container_name: docker_cli_sidecar
+    labels:
+      - "ha_docker_compose.protection=full"
+    environment:
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    volumes:
+      # The whole stacks root, not just this folder — docker-cli execs
+      # `docker compose` commands for every stack the integration manages,
+      # not only this one. Left side and right side must be IDENTICAL to
+      # the real host path, and identical to this integration's "stacks
+      # root" config value — see ../../README.md for why. No docker.sock
+      # mount.
+      - /opt/stacks:/opt/stacks
+    restart: unless-stopped
+    command: ["sleep", "infinity"]
+    networks:
+      - docker-proxy-net
+
+networks:
+  docker-proxy-net:

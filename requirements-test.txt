@@ -1,0 +1,7 @@
+pytest
+pytest-asyncio
+PyYAML
+voluptuous
+aiodocker
+aiohttp
+packaging

@@ -1,0 +1,116 @@
+# Deploying to HA Container (Docker)
+
+The Home Assistant image itself stays completely stock
+(`ghcr.io/home-assistant/home-assistant:stable`, unmodified) — this
+integration never runs `docker compose` as a local subprocess of the HA
+process, and never mounts the raw Docker socket into HA's own container.
+
+Three pieces:
+1. **`docker-socket-proxy`** — the only component with direct (read-only)
+   access to `/var/run/docker.sock`. Exposes a filtered subset of the
+   Docker Engine API over plain TCP.
+2. **A sidecar container** (`docker_cli_sidecar`) — has the real
+   `docker`/`docker compose` binaries, does nothing but sit idle, and
+   talks to Docker *through the proxy* (`DOCKER_HOST=tcp://docker-socket-proxy:2375`),
+   never via a direct socket mount. This integration Docker-execs into it
+   to run compose commands.
+3. **`homeassistant`** — talks to the proxy too, but since it runs with
+   `network_mode: host` (required for HA's own mDNS/discovery features)
+   it can't reach the proxy via the internal Docker network's service-name
+   DNS the way the sidecar can. It reaches the proxy via the host's own
+   loopback address instead — `tcp://127.0.0.1:2375`, since a container on
+   host networking shares the host's localhost.
+
+These live in **two separate stacks**, each its own folder under your
+stacks root — see `example-stacks/docker-infra/docker-compose.yml` and
+`example-stacks/homeassistant/docker-compose.yml`. They're split
+deliberately: `docker-infra` (the proxy + sidecar) is genuinely
+self-referential — the sidecar is what executes every compose command
+this integration issues, including any command that would target its own
+container — so both its services carry
+`labels: ["ha_docker_compose.protection=full"]`, which tells the
+integration never to create a switch or restart/pull button for them.
+`homeassistant` gets no such label and is a
+fully ordinary, unprotected stack — full switch, full restart, full pull
+button, same as any other stack you manage with this integration.
+
+## Why a proxy at all
+
+Mounting `/var/run/docker.sock` directly into any container gives that
+container root-equivalent access to the whole host — it can start a new
+container with the host filesystem bind-mounted in and escape. Routing
+through `docker-socket-proxy` instead means only the proxy ever touches
+the real socket (read-only), and it only forwards the specific API endpoint
+groups it's configured to allow (see below) — a compromised HA or sidecar
+container can't do anything the proxy wasn't explicitly told to permit.
+
+**The proxy's port must stay bound to `127.0.0.1` only** (`"127.0.0.1:2375:2375"`,
+never `"2375:2375"` or a LAN-reachable interface) — that binding is what
+makes it safe for a host-networked HA to reach it over loopback while
+staying unreachable from anywhere else on the network. Double-check this
+after any compose-file edit; it's the one line in this setup where a typo
+has real security consequences.
+
+## Proxy permissions
+
+`docker-socket-proxy` is allow-list-only: every endpoint group defaults to
+disabled unless its environment variable is set to `1`. Current minimum
+required by this integration:
+
+| Variable | Why |
+|---|---|
+| `CONTAINERS=1` | list/inspect containers — stats/state polling |
+| `EXEC=1` | Docker exec into the sidecar |
+| `IMAGES=1` | local image digest inspection — update-check comparison |
+| `POST=1` | required for *any* state-changing call (start/stop/restart act via POST) — without this the proxy is read-only regardless of the other flags |
+
+Do not enable additional groups (`VOLUMES`, `NETWORKS`, `SWARM`,
+`PLUGINS`, `SYSTEM`, etc.) speculatively. If something breaks with a 403
+from the proxy, find the specific endpoint group that call needs (see
+`docker-socket-proxy`'s own docs) and add only that one.
+
+## What you still need (unchanged from the sidecar-exec spec)
+
+**The stacks root mounted at the identical absolute path** in the sidecar
+and on the host — e.g. host `/opt/stacks` → sidecar `/opt/stacks`, never
+`/opt/stacks` → `/data/stacks`. The sidecar's `docker compose` process
+resolves any relative bind-mount paths declared inside a *managed* stack's
+own `docker-compose.yml` client-side, before sending them to the daemon —
+a path mismatch here means those bind mounts land in the wrong place. Do
+not add path-remapping logic to work around this; fix the mount instead.
+
+## Steps
+
+1. Copy `custom_components/ha_docker_compose` into your HA config folder's
+   `custom_components/` (the same host folder you bind-mount to `/config`).
+2. Under your stacks root, create `docker-infra/` and `homeassistant/`
+   folders and copy in the matching files from `example-stacks/`, filling
+   in your real paths. Bring `docker-infra` up first
+   (`docker compose up -d` from that folder), then `homeassistant`.
+3. Confirm the proxy is up and NOT reachable from elsewhere: from another
+   machine on your LAN, `curl http://<synology-ip>:2375/version` should
+   fail to connect. From the Docker host itself, `curl http://127.0.0.1:2375/version`
+   should succeed.
+4. In HA: Settings → Devices & Services → Add Integration → "Docker
+   Compose Manager". Fill in:
+   - Stacks root: the identical path from step 2 (e.g. `/opt/stacks`)
+   - Docker host address: `tcp://127.0.0.1:2375`
+   - Sidecar container name: `docker_cli_sidecar`
+5. Check Settings → System → Logs after adding it — discovery logs how
+   many stacks it found (`__init__.py`'s `_LOGGER.info` line). You should
+   see both `docker-infra` and `homeassistant` as discovered stacks;
+   `docker-infra` will have no switch or pull-update button (by design —
+   its services are labeled `protection=full`, see above), `homeassistant`
+   will have the full set.
+
+## If something isn't reachable
+
+- **Compose actions fail, error names the sidecar container**: check its
+  name matches your config exactly and that it's running (`docker ps`).
+- **Stats/state sensors never populate, or the config entry fails to set
+  up**: check the proxy container is running and that `homeassistant` can
+  actually reach `127.0.0.1:2375` (test with `curl` from inside the
+  `homeassistant` container if you can exec into it).
+- **A specific action fails with a 403-flavored error surfaced from
+  Docker**: the proxy is rejecting that endpoint group — see "Proxy
+  permissions" above.

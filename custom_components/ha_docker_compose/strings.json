@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Docker Compose Manager",
+        "description": "Point this integration at your Compose stacks root. Each immediate subfolder containing a docker-compose.yml/compose.yaml is discovered as one stack.",
+        "data": {
+          "stacks_root": "Stacks root folder (e.g. /opt/stacks)",
+          "docker_host": "Docker host address (e.g. tcp://127.0.0.1:2375 for docker-socket-proxy, or unix:///var/run/docker.sock)",
+          "sidecar_container": "Sidecar container name (runs docker compose commands)",
+          "poll_interval": "Poll interval (seconds) for live stats/state"
+        }
+      }
+    },
+    "error": {
+      "stacks_root_not_found": "That path does not exist or is not a directory.",
+      "invalid_docker_host": "Docker host address must start with tcp:// or unix://.",
+      "no_stacks_found": "No stacks found under that path (no subfolder with a docker-compose.yml/compose.yaml).",
+      "discovery_failed": "Stack discovery failed. Check the Home Assistant log for details."
+    },
+    "abort": {
+      "already_configured": "This stacks root is already configured."
+    }
+  }
+}

@@ -36,6 +36,10 @@ per-stack and per-service entities for:
   Docker socket, and you can point separate config entries at separate
   Docker hosts.
 
+
+ha-docker-compose brings your container infrastructure natively into Home Assistant by organizing your workflows around logical docker-compose.yml stacks rather than a flat, disconnected list of containers. It is built on a secure, least-privilege socket-proxy and sidecar architecture that completely sandboxes your core instance while scaling to multi-host environments—allowing you to manage local boxes and remote NAS setups side by side from a single interface. Beyond basic state monitoring, it delivers true version intelligence by walking image registries and correlating digests for update tracking.
+
+
 ## Installation
 
 ### Manual

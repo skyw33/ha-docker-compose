@@ -25,6 +25,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, STACK_STATE_UPDATING
+from .container_totals import total_running_cpu_percent, total_running_memory_gb
 from .coordinator import LogFetchResult, PullError, StacksCoordinator
 from .engine import ContainerInfo
 from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
@@ -82,6 +83,9 @@ async def async_setup_entry(
             entities.append(
                 ServiceDetectedVersionSensor(github_coordinator, entry.entry_id, stack.name, service)
             )
+
+    entities.append(TotalContainerCpuSensor(coordinator, entry.entry_id))
+    entities.append(TotalContainerMemorySensor(coordinator, entry.entry_id))
 
     async_add_entities(entities)
 
@@ -179,6 +183,77 @@ class StackComposeConfigSensor(StackDeviceEntity, SensorEntity):
         if status is not None:
             attrs["compose_config"] = status.info.raw_compose_text
         return attrs
+
+
+class _TotalContainerSensor(CoordinatorEntity[StacksCoordinator], SensorEntity):
+    """Shared per-entry total across every container this entry's
+    coordinator currently knows about — see MULTI_SITE_IDENTITY_SPEC.md.
+
+    coordinator.data's values already include an orphaned pseudo-stack's
+    containers alongside every real stack's (coordinator.py's
+    _async_update_data appends one entry per leftover compose-project
+    label with no matching folder) — so summing across every
+    StackStatus.containers here naturally includes orphaned containers
+    with no special-casing needed. The actual running/None filtering,
+    summing and rounding lives in container_totals.py (pure, unit tested
+    directly) — this class only assembles the raw container list.
+
+    has_entity_name=False and no device_info, deliberately: this is a
+    per-entry total, not scoped to any one stack's device, and turning
+    off has_entity_name makes the generated entity_id depend only on
+    _attr_name — verified against real HA entity-id-generation logic
+    (entity_platform.py's has_entity_name branch is skipped entirely when
+    False, regardless of whether a device is set) plus the actual
+    python-slugify call HA delegates to, not assumed.
+    """
+
+    _attr_has_entity_name = False
+
+    def __init__(self, coordinator: StacksCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator)
+        self._entry_id = entry_id
+
+    def _all_containers(self) -> list[ContainerInfo]:
+        return [
+            container
+            for status in (self.coordinator.data or {}).values()
+            for container in status.containers
+        ]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        return {"site": self.coordinator.site}
+
+
+class TotalContainerCpuSensor(_TotalContainerSensor):
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:chip"
+
+    def __init__(self, coordinator: StacksCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id)
+        self._attr_unique_id = f"{entry_id}_total_container_cpu"
+        self._attr_name = f"Total Container CPU {coordinator.site}"
+
+    @property
+    def native_value(self) -> float:
+        return total_running_cpu_percent(self._all_containers())
+
+
+class TotalContainerMemorySensor(_TotalContainerSensor):
+    _attr_device_class = SensorDeviceClass.DATA_SIZE
+    _attr_native_unit_of_measurement = UnitOfInformation.GIGABYTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:memory"
+
+    def __init__(self, coordinator: StacksCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id)
+        self._attr_unique_id = f"{entry_id}_total_container_memory"
+        self._attr_name = f"Total Container Memory {coordinator.site}"
+
+    @property
+    def native_value(self) -> float:
+        return total_running_memory_gb(self._all_containers())
 
 
 class _ServiceEntity(StackDeviceEntity):

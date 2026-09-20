@@ -140,7 +140,16 @@ class HaDockerComposeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             await self.async_set_unique_id(str(stacks_root))
                             self._abort_if_unique_id_configured()
                             return self.async_create_entry(
-                                title=stacks_root.name,
+                                # The resolved site slug, not stacks_root.name —
+                                # see MULTI_SITE_IDENTITY_SPEC.md's title
+                                # amendment. Using the slug (not the raw typed
+                                # site_name) keeps the title consistent with
+                                # every attribute/entity_id, which already show
+                                # the slug — including the auto-suffixed form
+                                # (e.g. "docker_2") when a collision occurred,
+                                # so two entries never share an identical-
+                                # looking title on the integrations page.
+                                title=site_slug,
                                 data={
                                     CONF_STACKS_ROOT: str(stacks_root),
                                     CONF_DOCKER_HOST: docker_host,
@@ -202,6 +211,7 @@ class HaDockerComposeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     return self.async_update_reload_and_abort(
                         entry,
+                        title=site_slug,
                         options={**entry.options, CONF_SITE_NAME: site_slug},
                         reason="reconfigure_successful",
                     )

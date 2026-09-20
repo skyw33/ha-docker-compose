@@ -36,6 +36,10 @@ per-stack and per-service entities for:
   Docker socket, and you can point separate config entries at separate
   Docker hosts.
 
+
+ha-docker-compose brings your container infrastructure natively into Home Assistant by organizing your workflows around logical docker-compose.yml stacks rather than a flat, disconnected list of containers. It is built on a secure, least-privilege socket-proxy and sidecar architecture that completely sandboxes your core instance while scaling to multi-host environments—allowing you to manage local boxes and remote NAS setups side by side from a single interface. Beyond basic state monitoring, it delivers true version intelligence by walking image registries and correlating digests for update tracking.
+
+
 ## Installation
 
 ### Manual
@@ -69,33 +73,36 @@ repository:
 
 ## Prerequisites
 
-This integration never runs `docker compose` as a local subprocess of the
-Home Assistant process, and never mounts the raw Docker socket into HA's
-own container — the stock `ghcr.io/home-assistant/home-assistant` image
-stays completely unmodified. Instead, it relies on two small pieces of
-supporting infrastructure that you deploy alongside it:
+This integration keeps Docker tooling and Docker socket access outside the
+Home Assistant container. Home Assistant does not need the Docker CLI
+installed, and it does not need `/var/run/docker.sock` mounted directly
+into the stock `ghcr.io/home-assistant/home-assistant` container.
 
-- **A sidecar container** with the real `docker`/`docker compose`
-  binaries, mounting your stacks root at the *identical* absolute path as
-  the host. This integration execs into it to actually run compose
-  commands. The example deploy below uses the official
-  [`docker:cli`](https://hub.docker.com/_/docker) image (the `cli` tag —
-  just the Docker/Compose CLI binaries, no daemon), but any image with
-  both binaries on `PATH` works.
-- **[`docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy)**
-  (`tecnativa/docker-socket-proxy`), the only component with direct
-  (read-only) access to `/var/run/docker.sock`, exposing a filtered,
-  allow-list-only subset of the Docker Engine API over plain TCP — bound
-  to localhost only. Both the sidecar and Home Assistant itself talk to
-  Docker through this proxy, never via a direct socket mount.
+Instead, the integration relies on two small helper containers:
 
-If you're running HA in Docker yourself, see
-[`docs/deploy/`](docs/deploy/) for a full worked example (two
-`docker-compose.yml` files, an explanation of why the proxy matters, and
-a step-by-step deploy walkthrough). If you're running HA OS/Supervised,
-the same sidecar + proxy pattern still applies — you'll need to run those
-two containers yourself since HA OS doesn't manage arbitrary Docker
-Compose stacks itself.
+- **A Docker CLI sidecar** that provides the real `docker` and
+  `docker compose` commands. The integration runs Compose commands inside
+  this sidecar whenever it needs to inspect or manage a stack. The sidecar
+  must mount your stacks directory at the *same absolute path* that exists
+  on the Docker host. For example, if your stacks live under
+  `/volume1/docker` on the host, they should also appear under
+  `/volume1/docker` inside the sidecar rather than being remapped to a
+  different path such as `/stacks`. This keeps Compose file paths and
+  absolute bind-mount paths consistent.
+
+- **A `docker-socket-proxy` container** that is the only component with a
+  direct mount of `/var/run/docker.sock`. It acts as a controlled gateway
+  to the Docker Engine API and exposes only the API areas enabled in its
+  configuration. Home Assistant and the Docker CLI sidecar communicate
+  with Docker through this proxy over TCP instead of mounting the Docker
+  socket themselves.
+
+For a Docker-based Home Assistant installation, the supporting sidecar and
+proxy containers are deployed alongside Home Assistant and your existing
+Compose stacks. The same overall architecture can also be used with Home
+Assistant OS or Supervised, but the sidecar and proxy still need to be run
+separately because Home Assistant does not manage arbitrary Docker Compose
+stacks on your behalf.
 
 ## Polling
 
@@ -142,7 +149,8 @@ directory's own README for the details and a screenshot.
 
 Every per-service entity already exposes plain `stack`/`service`
 attributes specifically to support a dashboard like this without any
-`entity_id` string-parsing.
+`entity_id` string-parsing.<img width="1076" height="569" alt="dashboard" src="https://github.com/user-attachments/assets/d58ba5a9-acc5-4f03-b70c-f06f799104f6" />
+
 
 ## Known limitations
 

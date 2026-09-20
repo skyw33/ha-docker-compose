@@ -108,20 +108,23 @@ stacks on your behalf.
 
 [`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy)
 exposes only the Docker Engine API areas you turn on, each behind its own
-environment variable (unset/`0` by default). This table covers only what
-*this integration's own Python code* calls directly against the Engine
-API — not what `docker compose` itself needs once it's running inside the
-sidecar (a separate, broader surface: image pulls, container create/
-start/stop, networks, volumes, and so on — outside this integration's own
-code and not audited here).
+environment variable — most sections are off by default (`EVENTS`,
+`PING` and `VERSION` are the exceptions, on by default). This table
+covers only what *this integration's own Python code* calls directly
+against the Engine API — not what `docker compose` itself needs once
+it's running inside the sidecar (a separate, broader surface: image
+pulls, container create/start/stop, networks, volumes, and so on —
+outside this integration's own code and not audited here).
 
 | Variable | Required? | What it gates here |
 |---|---|---|
 | `CONTAINERS=1` | Required | Live container list/inspect/stats — state, CPU and memory sensors — and container logs (the Fetch Logs button). Also needed for creating the exec sessions compose commands run through (`POST /containers/{id}/exec`). |
 | `IMAGES=1` | Required | Local image inspection for digest/label comparison (`update_available`, and the GitHub-release OCI-label fallback). |
 | `EXEC=1` | Required | Starting and polling the exec sessions used to run `docker compose` (pull, up, down, restart, start, stop, config) inside the sidecar. |
-| `POST=1` | Required | docker-socket-proxy denies every non-`GET`/`HEAD` request unless this is set. Everything else in this table is a plain `GET`; only starting an exec session is a `POST`, which is why this is needed at all. |
-| `INFO=1` | Optional | Host CPU core count (`GET /info`), used to normalize the per-site "Total Container CPU" sensor to a 0–100% figure. Without it, that one sensor falls back to the `online_cpus` value already present in each container's stats — it only shows as unavailable if `INFO` is off *and* nothing is running yet to supply that fallback. |
+| `POST=1` | Required | docker-socket-proxy denies every non-`GET`/`HEAD` request unless this is set. Both creating an exec session (`POST /containers/{id}/exec`) and starting it (`POST /exec/{id}/start`) are `POST` requests; everything else in this table is a plain `GET`. |
+| `INFO=1` | Optional | Host CPU core count (`GET /info`), used to normalize the per-site "Total Container CPU" sensor to a 0–100% figure. Without it, that sensor falls back to the `online_cpus` value already present in running containers' stats. If nothing is running, it reports `0`. It only goes unknown if something is running and its stats report no core count either. |
+
+> **Security note:** with `CONTAINERS`, `EXEC` and `POST` all enabled — required for this integration to manage your stacks at all — anything that can reach the proxy's published port can run arbitrary commands inside your containers, which is effectively control of the host. Bind the published port to a specific interface or firewall it to the Home Assistant host only; never expose it beyond a trusted network.
 
 ## Polling
 

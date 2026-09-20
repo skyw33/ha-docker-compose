@@ -92,6 +92,7 @@ class StacksCoordinator(DataUpdateCoordinator[dict[str, "StackStatus"]]):
         update_interval: timedelta = FAST_POLL_INTERVAL,
         *,
         site: str,
+        cpu_cores: int | None = None,
     ) -> None:
         # label distinguishes this coordinator's log lines from another
         # config entry's (e.g. a second Docker host) — every entry's
@@ -116,6 +117,16 @@ class StacksCoordinator(DataUpdateCoordinator[dict[str, "StackStatus"]]):
         # entity.py's stack_attributes() helper and by the per-entry total
         # sensors.
         self.site = site
+        # Host CPU core count (Docker Engine API's /info NCPU), fetched
+        # once per entry load by __init__.py and refreshed on every reload
+        # (a fresh StacksCoordinator is constructed on each) — see
+        # MULTI_SITE_IDENTITY_SPEC.md's CPU-percentage-of-host amendment.
+        # None means the /info call failed at load time; sensor.py's
+        # TotalContainerCpuSensor then falls back to ContainerInfo.
+        # online_cpus from live stats samples instead (see
+        # container_totals.resolve_host_cpu_cores) rather than treating
+        # this as a hard, unrecoverable failure.
+        self.cpu_cores = cpu_cores
         # Stack names with a Pull update in progress right now — set/cleared
         # by StackPullUpdateButton, read by StackStateSensor to show a
         # transient "updating" value in place of the real (momentarily

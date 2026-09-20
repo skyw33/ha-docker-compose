@@ -44,7 +44,12 @@ from .const import (
     KIND_STACK_STATE,
     STACK_STATE_UPDATING,
 )
-from .container_totals import total_running_cpu_percent, total_running_memory_gb
+from .container_totals import (
+    resolve_host_cpu_cores,
+    total_cores_used,
+    total_cpu_percent_of_host,
+    total_running_memory_gb,
+)
 from .coordinator import LogFetchResult, PullError, StacksCoordinator
 from .engine import ContainerInfo
 from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
@@ -246,6 +251,21 @@ class _TotalContainerSensor(CoordinatorEntity[StacksCoordinator], SensorEntity):
 
 
 class TotalContainerCpuSensor(_TotalContainerSensor):
+    """Percent of the WHOLE HOST's CPU capacity, 0-100 — not the raw sum
+    of per-container cpu_percent (which stays Docker's own convention
+    elsewhere, e.g. ServiceCpuSensor, where 100% is one core and a
+    container can exceed it on a multi-core host). See
+    MULTI_SITE_IDENTITY_SPEC.md's CPU-percentage-of-host amendment: the
+    raw per-container sum can reach cores*100 and isn't comparable
+    between hosts with different core counts, which this sensor exists
+    specifically to be.
+
+    Entity ID, unique_id, name pattern and kind are all unchanged by that
+    amendment — only native_value's meaning and unit changed, plus the
+    two new attributes below. Existing history for this sensor drops by
+    a factor of the host's core count from whenever this ships.
+    """
+
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:chip"
@@ -254,10 +274,46 @@ class TotalContainerCpuSensor(_TotalContainerSensor):
         super().__init__(coordinator, entry_id, KIND_SITE_TOTAL_CPU)
         self._attr_unique_id = f"{entry_id}_total_container_cpu"
         self._attr_name = f"Total Container CPU {coordinator.site}"
+        # De-dupes the "cores unavailable" warning to once per transition
+        # into that state, not once per fast-poll cycle — same pattern as
+        # update_coordinator.py's _warned_unsupported/_warned_auth_denied.
+        self._warned_cores_unavailable = False
+
+    def _resolved_cores(self) -> int | None:
+        cores = resolve_host_cpu_cores(self._all_containers(), self.coordinator.cpu_cores)
+        if cores is None:
+            if not self._warned_cores_unavailable:
+                _LOGGER.warning(
+                    "Total Container CPU (site '%s'): host CPU core count unavailable "
+                    "(Docker Engine /info failed at load, and no running container's stats "
+                    "sample reports online_cpus either) — reporting unknown rather than a "
+                    "percentage that would be scaled against the wrong core count",
+                    self.coordinator.site,
+                )
+                self._warned_cores_unavailable = True
+        else:
+            self._warned_cores_unavailable = False
+        return cores
 
     @property
-    def native_value(self) -> float:
-        return total_running_cpu_percent(self._all_containers())
+    def native_value(self) -> float | None:
+        cores = self._resolved_cores()
+        if cores is None:
+            return None
+        return total_cpu_percent_of_host(self._all_containers(), cores)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs: dict[str, Any] = dict(super().extra_state_attributes)
+        containers = self._all_containers()
+        cores = self._resolved_cores()
+        if cores is not None:
+            attrs["cpu_cores"] = cores
+        # Host-core-count-independent: "how many cores' worth of CPU are
+        # actually in use," meaningful even when cpu_cores above is
+        # missing and native_value is therefore unknown.
+        attrs["cores_used"] = total_cores_used(containers)
+        return attrs
 
 
 class TotalContainerMemorySensor(_TotalContainerSensor):

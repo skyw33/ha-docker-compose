@@ -71,6 +71,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     engine = DockerEngineClient(entry.data[CONF_DOCKER_HOST])
     await engine.connect()
 
+    # Once per entry load, refreshed on every reload since this whole
+    # function (and the StacksCoordinator it constructs) runs fresh each
+    # time — see MULTI_SITE_IDENTITY_SPEC.md's CPU-percentage-of-host
+    # amendment. None on failure is expected and handled downstream
+    # (get_host_cpu_count() already logs its own warning); not fatal to
+    # setup, since the per-site CPU total sensor has its own
+    # online_cpus-based fallback for exactly this case.
+    cpu_cores = await engine.get_host_cpu_count()
+
     compose_executor = ComposeExecutor(engine, sidecar_container)
 
     stacks = await discover_stacks(stacks_root, compose_executor)
@@ -84,7 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _async_prune_stale_devices(hass, entry, stacks)
 
     coordinator = StacksCoordinator(
-        hass, engine, stacks, coordinator_label, poll_interval, site=site
+        hass, engine, stacks, coordinator_label, poll_interval, site=site, cpu_cores=cpu_cores
     )
     await coordinator.async_config_entry_first_refresh()
 

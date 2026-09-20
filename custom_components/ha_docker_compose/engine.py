@@ -111,6 +111,16 @@ class ContainerInfo:
     # API call. Used as a fallback source for the GitHub-release OCI label
     # when the image itself doesn't set it (see github_coordinator.py).
     labels: dict[str, str] = field(default_factory=dict)
+    # The host's CPU core count as this container's own stats sample
+    # reported it (Docker's own `online_cpus`, already read internally by
+    # _calculate_cpu_percent) — every container on one host reports the
+    # same value. Exposed here purely as a fallback source for the
+    # per-site CPU total's host-core-count normalization
+    # (container_totals.resolve_host_cpu_cores) when the Engine API's
+    # /info call is unavailable — see MULTI_SITE_IDENTITY_SPEC.md's
+    # CPU-percentage-of-host amendment. None whenever cpu_percent is also
+    # None (not running, or the stats read failed).
+    online_cpus: int | None = None
 
 
 class DockerEngineClient:
@@ -134,6 +144,34 @@ class DockerEngineClient:
         if self._docker is not None:
             await self._docker.close()
             self._docker = None
+
+    async def get_host_cpu_count(self) -> int | None:
+        """The Docker host's CPU core count, from the Engine API's
+        GET /info (`NCPU`) — see MULTI_SITE_IDENTITY_SPEC.md's
+        CPU-percentage-of-host amendment. Chosen as the primary source
+        over `online_cpus` (also available per-container in stats
+        samples) because it's one cheap call that answers the question
+        directly, independent of whether any container happens to be
+        running yet — `online_cpus` only exists as a fallback for when
+        this call itself fails (see container_totals.resolve_host_cpu_cores),
+        not the other way around.
+
+        None on any failure (proxy down, malformed response, missing/
+        invalid NCPU) — callers must treat that as "unknown," never as
+        0 or 1 cores, and fall back to ContainerInfo.online_cpus instead.
+        """
+        if self._docker is None:
+            raise RuntimeError("DockerEngineClient.connect() must be called first")
+        try:
+            info = await self._docker.system.info()
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Failed to fetch Docker Engine /info for host CPU count", exc_info=True)
+            return None
+        ncpu = info.get("NCPU")
+        if not isinstance(ncpu, int) or ncpu <= 0:
+            _LOGGER.warning("Docker Engine /info returned an invalid NCPU value: %r", ncpu)
+            return None
+        return ncpu
 
     async def exec_in_container(
         self,
@@ -385,13 +423,14 @@ class DockerEngineClient:
         state = details.get("State", {}) or {}
 
         cpu_percent: float | None = None
+        online_cpus: int | None = None
         memory_usage: int | None = None
         memory_limit: int | None = None
         if state.get("Running"):
             try:
                 stats = await container.stats(stream=False)
                 sample = stats[0] if isinstance(stats, list) else stats
-                cpu_percent = _calculate_cpu_percent(sample)
+                cpu_percent, online_cpus = _calculate_cpu_percent(sample)
                 mem = sample.get("memory_stats", {}) or {}
                 memory_usage = mem.get("usage")
                 memory_limit = mem.get("limit")
@@ -436,22 +475,31 @@ class DockerEngineClient:
             image_id=details.get("Image", ""),
             started_at=started_at,
             cpu_percent=cpu_percent,
+            online_cpus=online_cpus,
             memory_usage_bytes=memory_usage,
             memory_limit_bytes=memory_limit,
             labels=labels,
         )
 
 
-def _calculate_cpu_percent(stats: dict[str, Any]) -> float | None:
-    """Standard Docker CPU% formula (the same one `docker stats` uses)."""
+def _calculate_cpu_percent(stats: dict[str, Any]) -> tuple[float | None, int | None]:
+    """Standard Docker CPU% formula (the same one `docker stats` uses).
+
+    Returns (cpu_percent, online_cpus) — online_cpus is returned too, not
+    just used internally, since it doubles as ContainerInfo.online_cpus,
+    the fallback host-core-count source for the per-site CPU total when
+    the Engine API's /info call is unavailable (see
+    DockerEngineClient.get_host_cpu_count() and container_totals.py).
+    """
+    online_cpus: int | None = None
     try:
         cpu = stats["cpu_stats"]
+        online_cpus = cpu.get("online_cpus") or len(cpu["cpu_usage"].get("percpu_usage") or [1])
         precpu = stats["precpu_stats"]
         cpu_delta = cpu["cpu_usage"]["total_usage"] - precpu["cpu_usage"]["total_usage"]
         system_delta = cpu["system_cpu_usage"] - precpu["system_cpu_usage"]
-        online_cpus = cpu.get("online_cpus") or len(cpu["cpu_usage"].get("percpu_usage") or [1])
         if system_delta > 0 and cpu_delta >= 0:
-            return (cpu_delta / system_delta) * online_cpus * 100.0
+            return (cpu_delta / system_delta) * online_cpus * 100.0, online_cpus
     except (KeyError, TypeError, ZeroDivisionError):
         pass
-    return None
+    return None, online_cpus

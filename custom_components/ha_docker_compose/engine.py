@@ -164,6 +164,22 @@ class DockerEngineClient:
             raise RuntimeError("DockerEngineClient.connect() must be called first")
         try:
             info = await self._docker.system.info()
+        except aiodocker.exceptions.DockerError as err:
+            if err.status == 403:
+                # The single most common real-world cause: docker-socket-proxy
+                # with INFO unset (it defaults to off) — see README's "Using
+                # docker-socket-proxy" section. Named explicitly rather than
+                # folded into the generic warning below, since this one has
+                # an exact, one-line fix.
+                _LOGGER.warning(
+                    "Docker Engine /info returned 403 Forbidden while fetching the host CPU "
+                    "count — if you're running behind docker-socket-proxy, set INFO=1 on it "
+                    "(optional but recommended; without it this falls back to online_cpus from "
+                    "container stats, which only works once something is running)"
+                )
+            else:
+                _LOGGER.warning("Failed to fetch Docker Engine /info for host CPU count: %s", err)
+            return None
         except Exception:  # noqa: BLE001
             _LOGGER.warning("Failed to fetch Docker Engine /info for host CPU count", exc_info=True)
             return None

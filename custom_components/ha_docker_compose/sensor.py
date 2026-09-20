@@ -279,9 +279,16 @@ class TotalContainerCpuSensor(_TotalContainerSensor):
         # update_coordinator.py's _warned_unsupported/_warned_auth_denied.
         self._warned_cores_unavailable = False
 
-    def _resolved_cores(self) -> int | None:
-        cores = resolve_host_cpu_cores(self._all_containers(), self.coordinator.cpu_cores)
-        if cores is None:
+    def _resolve(self) -> tuple[int | None, float | None]:
+        """Returns (cores, native_value). Warns (deduped) only when cores
+        are genuinely unavailable *and* something is running — see
+        total_cpu_percent_of_host()'s docstring for why "nothing running"
+        resolves to a real 0.0 instead, with no warning, regardless of
+        whether cores could be resolved."""
+        containers = self._all_containers()
+        cores = resolve_host_cpu_cores(containers, self.coordinator.cpu_cores)
+        value = total_cpu_percent_of_host(containers, cores)
+        if cores is None and value is None:
             if not self._warned_cores_unavailable:
                 _LOGGER.warning(
                     "Total Container CPU (site '%s'): host CPU core count unavailable "
@@ -293,26 +300,23 @@ class TotalContainerCpuSensor(_TotalContainerSensor):
                 self._warned_cores_unavailable = True
         else:
             self._warned_cores_unavailable = False
-        return cores
+        return cores, value
 
     @property
     def native_value(self) -> float | None:
-        cores = self._resolved_cores()
-        if cores is None:
-            return None
-        return total_cpu_percent_of_host(self._all_containers(), cores)
+        _, value = self._resolve()
+        return value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         attrs: dict[str, Any] = dict(super().extra_state_attributes)
-        containers = self._all_containers()
-        cores = self._resolved_cores()
+        cores, _ = self._resolve()
         if cores is not None:
             attrs["cpu_cores"] = cores
         # Host-core-count-independent: "how many cores' worth of CPU are
         # actually in use," meaningful even when cpu_cores above is
         # missing and native_value is therefore unknown.
-        attrs["cores_used"] = total_cores_used(containers)
+        attrs["cores_used"] = total_cores_used(self._all_containers())
         return attrs
 
 

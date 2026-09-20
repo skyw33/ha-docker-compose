@@ -107,11 +107,20 @@ def test_total_cpu_percent_of_host_zero_when_nothing_running() -> None:
     assert total_cpu_percent_of_host(containers, host_cpu_cores=4) == 0.0
 
 
-def test_total_cpu_percent_of_host_none_when_core_count_missing() -> None:
-    # Never 0.0 — a missing core count must not masquerade as "nothing
-    # running."
+def test_total_cpu_percent_of_host_none_when_core_count_missing_and_something_running() -> None:
+    # Not 0.0 — a missing core count must not masquerade as "nothing
+    # running" when something demonstrably is.
     containers = [_container(state="running", cpu_percent=50.0)]
     assert total_cpu_percent_of_host(containers, host_cpu_cores=None) is None
+
+
+def test_total_cpu_percent_of_host_zero_when_core_count_missing_but_nothing_running() -> None:
+    # The one case where a missing core count doesn't matter: there's
+    # nothing to normalize either way, so 0.0 is unambiguous — no need to
+    # report unknown just because /info also happened to fail.
+    containers = [_container(state="exited", cpu_percent=80.0)]
+    assert total_cpu_percent_of_host(containers, host_cpu_cores=None) == 0.0
+    assert total_cpu_percent_of_host([], host_cpu_cores=None) == 0.0
 
 
 def test_total_cpu_percent_of_host_rounds_to_one_decimal() -> None:

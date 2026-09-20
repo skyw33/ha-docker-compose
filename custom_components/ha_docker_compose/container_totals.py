@@ -62,15 +62,20 @@ def total_cpu_percent_of_host(
     _sum_running_cpu_percent; 0.0 when nothing is running falls out of
     dividing 0 by a real core count.
 
-    None (never 0.0) when host_cpu_cores is unavailable — a missing core
-    count must not silently masquerade as "nothing running." Callers
-    (sensor.py's TotalContainerCpuSensor) are expected to surface a None
-    here as the sensor going unknown, with a logged warning, not as a
-    real reading of 0%.
+    host_cpu_cores unavailable (None or falsy) is handled specially:
+    if nothing is running either (raw sum is 0), the answer is still
+    unambiguously 0.0 — the missing divisor genuinely doesn't matter
+    when there's nothing to normalize. Only when something *is* running
+    and there's no core count to normalize it against does this return
+    None, since a real, nonzero reading with the wrong (or a guessed)
+    denominator would be actively misleading. Callers (sensor.py's
+    TotalContainerCpuSensor) are expected to surface that None as the
+    sensor going unknown, with a logged warning — never as 0%.
     """
+    raw_sum = _sum_running_cpu_percent(containers)
     if not host_cpu_cores:
-        return None
-    return round(_sum_running_cpu_percent(containers) / host_cpu_cores, 1)
+        return 0.0 if raw_sum == 0 else None
+    return round(raw_sum / host_cpu_cores, 1)
 
 
 def total_cores_used(containers: Iterable[ContainerInfo]) -> float:
@@ -85,8 +90,8 @@ def total_cores_used(containers: Iterable[ContainerInfo]) -> float:
 
 def total_running_memory_gb(containers: Iterable[ContainerInfo]) -> float:
     """Sum of memory_usage_bytes across running containers, converted from
-    bytes to GB and rounded to 2 decimals. Same exclusion rules as
-    total_running_cpu_percent."""
+    bytes to GB and rounded to 2 decimals. Same running/None exclusion
+    rules as _sum_running_cpu_percent above."""
     values = [
         c.memory_usage_bytes
         for c in containers

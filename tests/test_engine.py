@@ -1,7 +1,9 @@
 import asyncio
+import logging
 import time
 from unittest.mock import patch
 
+import aiodocker.exceptions
 import pytest
 
 from ha_docker_compose.engine import DockerEngineClient, _calculate_cpu_percent
@@ -184,6 +186,21 @@ async def test_get_host_cpu_count_none_when_info_call_fails() -> None:
     client = _client_with_fake_system_info(error=RuntimeError("proxy down"))
 
     assert await client.get_host_cpu_count() is None
+
+
+@pytest.mark.asyncio
+async def test_get_host_cpu_count_403_logs_socket_proxy_hint(caplog) -> None:
+    """A 403 almost always means docker-socket-proxy with INFO unset (it
+    defaults to off) — see README's "Using docker-socket-proxy" section.
+    The warning must name that specifically, not just "failed"."""
+    error = aiodocker.exceptions.DockerError(403, {"message": "authorization denied"})
+    client = _client_with_fake_system_info(error=error)
+
+    with caplog.at_level(logging.WARNING):
+        result = await client.get_host_cpu_count()
+
+    assert result is None
+    assert any("INFO=1" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

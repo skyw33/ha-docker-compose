@@ -20,6 +20,7 @@ from .const import (
     CONF_DOCKER_HOST,
     CONF_POLL_INTERVAL,
     CONF_SIDECAR_CONTAINER,
+    CONF_SITE_NAME,
     CONF_STACKS_ROOT,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_SIDECAR_CONTAINER,
@@ -31,6 +32,7 @@ from .discovery import StackInfo, discover_stacks
 from .engine import DockerEngineClient
 from .github_coordinator import GitHubReleaseCoordinator
 from .pull_jobs import PullJobRunner, PullJobStore
+from .site_identity import other_site_slugs, resolve_unique_site_slug, slugify_site_name
 from .storage import DigestHistoryStore
 from .tag_walk_coordinator import TagWalkCoordinator
 from .update_coordinator import UpdateCheckCoordinator
@@ -64,6 +66,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # uniqueness key).
     coordinator_label = str(stacks_root)
 
+    site = _resolve_site(hass, entry, stacks_root)
+
     engine = DockerEngineClient(entry.data[CONF_DOCKER_HOST])
     await engine.connect()
 
@@ -79,7 +83,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _async_prune_stale_devices(hass, entry, stacks)
 
-    coordinator = StacksCoordinator(hass, engine, stacks, coordinator_label, poll_interval)
+    coordinator = StacksCoordinator(
+        hass, engine, stacks, coordinator_label, poll_interval, site=site
+    )
     await coordinator.async_config_entry_first_refresh()
 
     digest_history = DigestHistoryStore(hass, entry.entry_id)
@@ -148,6 +154,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+def _resolve_site(hass: HomeAssistant, entry: ConfigEntry, stacks_root: Path) -> str:
+    """Returns this entry's site slug, resolving and persisting a default
+    on first load if none is stored yet — see MULTI_SITE_IDENTITY_SPEC.md.
+
+    Existing entries from before this spec have no CONF_SITE_NAME in
+    entry.options at all; no migration is needed for them to keep
+    working, but the *default* still has to be genuinely unique across
+    entries, and site uniqueness is a cross-entry property — computing it
+    fresh on every load (without persisting) would make the resolved slug
+    depend on which entry happens to load first, which can vary across HA
+    restarts. Persisting it the first time this runs removes that
+    instability: after this, only an explicit reconfigure ever changes it.
+    """
+    site = entry.options.get(CONF_SITE_NAME)
+    other_slugs = other_site_slugs(
+        [
+            (other.entry_id, other.options.get(CONF_SITE_NAME))
+            for other in hass.config_entries.async_entries(DOMAIN)
+        ],
+        entry.entry_id,
+    )
+
+    if site is None:
+        site = resolve_unique_site_slug(slugify_site_name(stacks_root.name), other_slugs)
+        hass.config_entries.async_update_entry(
+            entry, options={**entry.options, CONF_SITE_NAME: site}
+        )
+        _LOGGER.info("Resolved and persisted site name '%s' for stacks root %s", site, stacks_root)
+    elif site in other_slugs:
+        # Structurally shouldn't happen once every entry has gone through
+        # this same resolution at least once (config_flow.py's own
+        # collision check, plus the branch above, both prevent it going
+        # forward) — but two *legacy* entries loading for the first time
+        # in the same startup, both deriving the same default from
+        # identically-named stacks_root leaf folders, could still land
+        # here simultaneously depending on load order. Loud, not silent:
+        # a log warning per the spec (no Repair issue for this stage).
+        _LOGGER.warning(
+            "Site name '%s' for stacks root %s is also used by another Docker Compose Manager "
+            "entry — set a distinct site name for one of them via that entry's Reconfigure "
+            "option (Settings > Devices & Services)",
+            site,
+            stacks_root,
+        )
+
+    return site
 
 
 def _async_prune_stale_devices(

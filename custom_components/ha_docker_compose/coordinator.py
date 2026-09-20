@@ -90,6 +90,8 @@ class StacksCoordinator(DataUpdateCoordinator[dict[str, "StackStatus"]]):
         stacks: list[StackInfo],
         label: str,
         update_interval: timedelta = FAST_POLL_INTERVAL,
+        *,
+        site: str,
     ) -> None:
         # label distinguishes this coordinator's log lines from another
         # config entry's (e.g. a second Docker host) — every entry's
@@ -107,6 +109,13 @@ class StacksCoordinator(DataUpdateCoordinator[dict[str, "StackStatus"]]):
         )
         self._engine = engine
         self.stacks = stacks
+        # This entry's resolved, slugified site name — see
+        # MULTI_SITE_IDENTITY_SPEC.md. Resolved once in __init__.py
+        # (config-flow-chosen, or auto-derived and persisted to
+        # entry.options on first load) and never recomputed here; read by
+        # entity.py's stack_attributes() helper and by the per-entry total
+        # sensors.
+        self.site = site
         # Stack names with a Pull update in progress right now — set/cleared
         # by StackPullUpdateButton, read by StackStateSensor to show a
         # transient "updating" value in place of the real (momentarily

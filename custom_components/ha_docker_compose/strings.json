@@ -8,7 +8,15 @@
           "stacks_root": "Stacks root folder (e.g. /opt/stacks)",
           "docker_host": "Docker host address (e.g. tcp://127.0.0.1:2375 for docker-socket-proxy, or unix:///var/run/docker.sock)",
           "sidecar_container": "Sidecar container name (runs docker compose commands)",
-          "poll_interval": "Poll interval (seconds) for live stats/state"
+          "poll_interval": "Poll interval (seconds) for live stats/state",
+          "site_name": "Site name (optional — identifies this Docker host on the dashboard; left blank, one is derived from the stacks root folder name)"
+        }
+      },
+      "reconfigure": {
+        "title": "Change site name",
+        "description": "Change this entry's site name. Every other setting (stacks root, Docker host, sidecar, poll interval) has no reconfigure option yet — delete and re-add the entry to change those.",
+        "data": {
+          "site_name": "Site name"
         }
       }
     },
@@ -16,10 +24,14 @@
       "stacks_root_not_found": "That path does not exist or is not a directory.",
       "invalid_docker_host": "Docker host address must start with tcp:// or unix://.",
       "no_stacks_found": "No stacks found under that path (no subfolder with a docker-compose.yml/compose.yaml).",
-      "discovery_failed": "Stack discovery failed. Check the Home Assistant log for details."
+      "discovery_failed": "Stack discovery failed. Check the Home Assistant log for details.",
+      "site_name_already_used": "That site name is already used by another Docker Compose Manager entry.",
+      "site_name_required": "Site name cannot be blank."
     },
     "abort": {
-      "already_configured": "This stacks root is already configured."
+      "already_configured": "This stacks root is already configured.",
+      "reconfigure_entry_not_found": "The config entry being reconfigured no longer exists.",
+      "reconfigure_successful": "Site name updated."
     }
   }
 }

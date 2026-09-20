@@ -6,6 +6,11 @@ CONF_STACKS_ROOT = "stacks_root"
 CONF_DOCKER_HOST = "docker_host"
 CONF_SIDECAR_CONTAINER = "sidecar_container"
 CONF_POLL_INTERVAL = "poll_interval"
+# Stored in entry.options, never entry.data — see MULTI_SITE_IDENTITY_SPEC.md.
+# Lets a reconfigure step change just this one field via
+# async_update_reload_and_abort(options=...) without touching the rest of
+# the entry's data at all.
+CONF_SITE_NAME = "site_name"
 
 # A full Docker daemon address, per aiodocker's `url` parameter — either
 # `unix:///path/to/docker.sock` or `tcp://host:port`. Defaults to the

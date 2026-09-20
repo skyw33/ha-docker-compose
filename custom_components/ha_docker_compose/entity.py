@@ -30,10 +30,15 @@ from .coordinator import StacksCoordinator, StackStatus
 from .device_ids import service_device_identifier, stack_device_identifier
 
 
-def stack_device_info(entry_id: str, stack_name: str) -> DeviceInfo:
+def stack_device_info(entry_id: str, stack_name: str, site: str) -> DeviceInfo:
+    # site in the display name, e.g. "jellyfin (nas)" — see
+    # MULTI_SITE_IDENTITY_SPEC.md: two stacks with the same name on
+    # different sites otherwise show up identically in HA's device list
+    # with nothing to tell them apart, even though their identifiers
+    # (entry_id-qualified — see device_ids.py) never actually collide.
     return DeviceInfo(
         identifiers={stack_device_identifier(entry_id, stack_name)},
-        name=stack_name,
+        name=f"{stack_name} ({site})",
         manufacturer="Docker Compose",
     )
 
@@ -45,6 +50,17 @@ def service_device_info(entry_id: str, stack_name: str, service_name: str) -> De
         manufacturer="Docker Compose",
         via_device=stack_device_identifier(entry_id, stack_name),
     )
+
+
+def stack_attributes(site: str, stack_name: str) -> dict[str, str]:
+    """The `site`/`stack` attribute pair every stack-level entity exposes
+    — same rationale as service_attributes() below, and deliberately the
+    same shape (a plain function each entity calls and merges into its own
+    dict, not a base-class property): none of the entities this is used
+    from currently chain into `super().extra_state_attributes`, and two of
+    them (StackUpdateAvailableSensor, on UpdateCheckCoordinator) don't
+    even share a base class with the rest — see MULTI_SITE_IDENTITY_SPEC.md."""
+    return {"site": site, "stack": stack_name}
 
 
 def service_attributes(stack_name: str, service_name: str) -> dict[str, str]:
@@ -72,7 +88,10 @@ class StackDeviceEntity(CoordinatorEntity[StacksCoordinator]):
         super().__init__(coordinator)
         self._entry_id = entry_id
         self._stack_name = stack_name
-        self._attr_device_info = stack_device_info(entry_id, stack_name)
+        # Overwritten right after by every service-level subclass
+        # (service_device_info() instead) — harmless, since only the
+        # final assignment in __init__ matters; see those subclasses.
+        self._attr_device_info = stack_device_info(entry_id, stack_name, coordinator.site)
 
     @property
     def _status(self) -> StackStatus | None:

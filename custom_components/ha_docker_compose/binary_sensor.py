@@ -23,7 +23,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import StacksCoordinator
-from .entity import service_attributes, service_device_info, stack_device_info
+from .entity import service_attributes, service_device_info, stack_attributes, stack_device_info
 from .update_coordinator import ServiceUpdateStatus, UpdateCheckCoordinator
 
 
@@ -38,7 +38,9 @@ async def async_setup_entry(
     entities: list[BinarySensorEntity] = []
     for stack in stacks_coordinator.stacks:
         entities.append(
-            StackUpdateAvailableSensor(update_coordinator, entry.entry_id, stack.name)
+            StackUpdateAvailableSensor(
+                update_coordinator, entry.entry_id, stack.name, stacks_coordinator.site
+            )
         )
         for service in stack.service_names:
             entities.append(
@@ -117,12 +119,19 @@ class StackUpdateAvailableSensor(CoordinatorEntity[UpdateCheckCoordinator], Bina
     _attr_has_entity_name = True
     _attr_icon = "mdi:package-up"
 
-    def __init__(self, coordinator: UpdateCheckCoordinator, entry_id: str, stack_name: str) -> None:
+    def __init__(
+        self, coordinator: UpdateCheckCoordinator, entry_id: str, stack_name: str, site: str
+    ) -> None:
         super().__init__(coordinator)
         self._stack_name = stack_name
+        self._site = site
         self._attr_unique_id = f"{entry_id}_{stack_name}_update_available"
         self._attr_name = "Update available"
-        self._attr_device_info = stack_device_info(entry_id, stack_name)
+        self._attr_device_info = stack_device_info(entry_id, stack_name, site)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        return stack_attributes(self._site, self._stack_name)
 
     @property
     def is_on(self) -> bool | None:

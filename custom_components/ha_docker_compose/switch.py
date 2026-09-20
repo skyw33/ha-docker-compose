@@ -27,7 +27,7 @@ from .compose import ComposeCommandError, ComposeExecutor
 from .const import DOMAIN, STACK_STATE_STOPPED
 from .coordinator import StacksCoordinator
 from .engine import ContainerInfo
-from .entity import StackDeviceEntity, service_attributes, service_device_info
+from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
 from .protection import is_service_protected, is_stack_protected
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,6 +86,10 @@ class StackRunningSwitch(StackDeviceEntity, SwitchEntity):
         # page has no room for secondary text under a control. See
         # ENTITY_NAMES_SPEC.md. unique_id/entity_id are unchanged.
         self._attr_name = "Start/Stop (Compose Up/Down)"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        return stack_attributes(self.coordinator.site, self._stack_name)
 
     @property
     def is_on(self) -> bool | None:

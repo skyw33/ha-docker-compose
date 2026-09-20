@@ -36,7 +36,7 @@ from .compose import ComposeCommandError, ComposeExecutor
 from .const import DOMAIN, LOG_FETCH_TAIL_LINES
 from .coordinator import LogFetchResult, StacksCoordinator
 from .engine import ContainerLogsUnavailableError, DockerEngineClient
-from .entity import StackDeviceEntity, service_attributes, service_device_info
+from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
 from .protection import is_service_protected, is_stack_protected
 from .pull_jobs import PullJobRunner
 from .tag_walk_coordinator import TagWalkCoordinator
@@ -122,6 +122,10 @@ class StackPullUpdateButton(StackDeviceEntity, ButtonEntity):
         # unique_id/entity_id are unchanged.
         self._attr_name = "Update (Compose Pull & Up)"
 
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        return stack_attributes(self.coordinator.site, self._stack_name)
+
     async def async_press(self) -> None:
         # Unconditional, before anything else can short-circuit: if this
         # line never shows up in the log, the press isn't reaching this
@@ -184,6 +188,10 @@ class StackCheckUpdatesButton(StackDeviceEntity, ButtonEntity):
         # at all, it's a direct HTTP call to the image registry's API
         # comparing digests. unique_id/entity_id are unchanged.
         self._attr_name = "Check for Update (Registry)"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        return stack_attributes(self.coordinator.site, self._stack_name)
 
     async def async_press(self) -> None:
         _LOGGER.info("StackCheckUpdatesButton.async_press() called for stack '%s'", self._stack_name)

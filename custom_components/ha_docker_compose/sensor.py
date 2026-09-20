@@ -27,7 +27,7 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN, STACK_STATE_UPDATING
 from .coordinator import LogFetchResult, PullError, StacksCoordinator
 from .engine import ContainerInfo
-from .entity import StackDeviceEntity, service_attributes, service_device_info
+from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
 from .github_coordinator import GitHubReleaseCoordinator, ServiceMetadata
 from .github_release import GitHubRelease
 from .tag_walk_coordinator import ServiceTagWalkStatus, TagWalkCoordinator
@@ -113,7 +113,9 @@ class StackStateSensor(StackDeviceEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         status = self._status
-        attrs: dict[str, Any] = {"has_env_file": status.info.has_env_file} if status else {}
+        attrs: dict[str, Any] = stack_attributes(self.coordinator.site, self._stack_name)
+        if status:
+            attrs["has_env_file"] = status.info.has_env_file
         # Surfaces a failed Pull update once the transient "updating" state
         # above has already reverted — without this, a real, logged
         # failure (bad tag, registry rate limit, sidecar lost track of the
@@ -172,10 +174,11 @@ class StackComposeConfigSensor(StackDeviceEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = stack_attributes(self.coordinator.site, self._stack_name)
         status = self._status
-        if status is None:
-            return {}
-        return {"compose_config": status.info.raw_compose_text}
+        if status is not None:
+            attrs["compose_config"] = status.info.raw_compose_text
+        return attrs
 
 
 class _ServiceEntity(StackDeviceEntity):

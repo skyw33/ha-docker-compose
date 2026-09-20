@@ -234,7 +234,9 @@ class ServiceFetchLogsButton(StackDeviceEntity, ButtonEntity):
         self._service_name = service_name
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_fetch_logs"
         self._attr_name = f"{service_name} fetch logs"
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
@@ -300,7 +302,9 @@ class ServiceRestartButton(StackDeviceEntity, ButtonEntity):
         # Display name only — see ENTITY_NAMES_SPEC.md. No parenthetical
         # (kept short, per spec) — runs `docker compose restart <service>`.
         self._attr_name = f"{service_name} Restart"
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:

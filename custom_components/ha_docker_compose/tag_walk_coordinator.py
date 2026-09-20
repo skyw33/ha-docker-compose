@@ -134,6 +134,11 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         self._warned_unsupported: set[tuple[str, str]] = set()
         self._warned_auth_denied: set[tuple[str, str]] = set()
 
+    @property
+    def site(self) -> str:
+        """See update_coordinator.py's identical property."""
+        return self._stacks_coordinator.site
+
     async def _async_update_data(self) -> dict[str, dict[str, ServiceTagWalkStatus]]:
         stack_statuses = self._stacks_coordinator.data or {}
         running = {

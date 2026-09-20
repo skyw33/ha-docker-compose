@@ -66,7 +66,9 @@ class ServiceUpdateAvailableSensor(CoordinatorEntity[UpdateCheckCoordinator], Bi
         self._service_name = service_name
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_update_available"
         self._attr_name = f"{service_name} update available"
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def _status(self) -> ServiceUpdateStatus | None:

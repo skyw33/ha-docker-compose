@@ -98,6 +98,11 @@ class GitHubReleaseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Service
         self._digest_history = digest_history
         self._session = async_get_clientsession(hass)
 
+    @property
+    def site(self) -> str:
+        """See update_coordinator.py's identical property."""
+        return self._stacks_coordinator.site
+
     async def _async_update_data(self) -> dict[str, dict[str, ServiceMetadata]]:
         result: dict[str, dict[str, ServiceMetadata]] = {}
         stack_statuses = self._stacks_coordinator.data or {}

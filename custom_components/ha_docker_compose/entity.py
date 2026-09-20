@@ -43,10 +43,19 @@ def stack_device_info(entry_id: str, stack_name: str, site: str) -> DeviceInfo:
     )
 
 
-def service_device_info(entry_id: str, stack_name: str, service_name: str) -> DeviceInfo:
+def service_device_info(
+    entry_id: str, stack_name: str, service_name: str, site: str
+) -> DeviceInfo:
+    # site in the display name is required for uniqueness, not cosmetic:
+    # service entity_ids derive from the service device's own name (see
+    # stack_device_info's identical reasoning) — without it, two
+    # same-named stacks/services on different sites would produce devices
+    # with the same display name, and their entity_ids would only be told
+    # apart by an arbitrary HA-assigned _2 suffix. See
+    # MULTI_SITE_IDENTITY_SPEC.md.
     return DeviceInfo(
         identifiers={service_device_identifier(entry_id, stack_name, service_name)},
-        name=f"{stack_name} / {service_name}",
+        name=f"{stack_name} ({site}) / {service_name}",
         manufacturer="Docker Compose",
         via_device=stack_device_identifier(entry_id, stack_name),
     )

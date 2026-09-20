@@ -190,7 +190,9 @@ class _ServiceEntity(StackDeviceEntity):
         # Own device (not the stack's) so a service dropped from an edited
         # compose file can be pruned independently on reload — see
         # entity.py and __init__.py's stale-device cleanup.
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def _container(self) -> ContainerInfo | None:
@@ -385,7 +387,9 @@ class _UpdateServiceEntity(CoordinatorEntity[UpdateCheckCoordinator]):
         super().__init__(coordinator)
         self._stack_name = stack_name
         self._service_name = service_name
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def _update_status(self) -> ServiceUpdateStatus | None:
@@ -500,7 +504,9 @@ class _TagWalkServiceEntity(CoordinatorEntity[TagWalkCoordinator]):
         super().__init__(coordinator)
         self._stack_name = stack_name
         self._service_name = service_name
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def _tag_walk_status(self) -> ServiceTagWalkStatus | None:
@@ -587,7 +593,9 @@ class ServiceLatestGithubReleaseSensor(CoordinatorEntity[GitHubReleaseCoordinato
         self._service_name = service_name
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_latest_github_release"
         self._attr_name = f"{service_name} latest GitHub release"
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def _metadata(self) -> ServiceMetadata | None:
@@ -646,7 +654,9 @@ class ServiceDetectedVersionSensor(CoordinatorEntity[GitHubReleaseCoordinator], 
         self._service_name = service_name
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_detected_version"
         self._attr_name = f"{service_name} detected version"
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def native_value(self) -> str | None:

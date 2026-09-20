@@ -140,7 +140,9 @@ class ServiceRunningSwitch(StackDeviceEntity, SwitchEntity):
         # asserting "(Compose Up/Down)" the way the stack-level switch does
         # would have been actively wrong.
         self._attr_name = f"{service_name} Start/Stop"
-        self._attr_device_info = service_device_info(entry_id, stack_name, service_name)
+        self._attr_device_info = service_device_info(
+            entry_id, stack_name, service_name, coordinator.site
+        )
 
     @property
     def _container(self) -> ContainerInfo | None:

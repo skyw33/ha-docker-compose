@@ -177,6 +177,15 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
         self._known_on_services: set[tuple[str, str]] = set()
         self._transition_callback: TransitionCallback | None = None
 
+    @property
+    def site(self) -> str:
+        """This entry's resolved site slug — reads through to the
+        StacksCoordinator this was constructed with, rather than copying
+        it, so it can't go stale. See coordinator.py's own `site` and
+        MULTI_SITE_IDENTITY_SPEC.md; used by service_device_info() calls
+        for entities bound to this coordinator instead."""
+        return self._stacks_coordinator.site
+
     def set_transition_callback(self, callback: TransitionCallback) -> None:
         """Called once from __init__.py after TagWalkCoordinator exists —
         see module docstring for why this is a late-bound callback rather

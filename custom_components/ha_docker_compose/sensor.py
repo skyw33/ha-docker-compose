@@ -24,7 +24,26 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, STACK_STATE_UPDATING
+from .const import (
+    DOMAIN,
+    KIND_SERVICE_CPU,
+    KIND_SERVICE_DETECTED_VERSION,
+    KIND_SERVICE_LAST_FETCHED_LOGS,
+    KIND_SERVICE_LAST_PULLED,
+    KIND_SERVICE_LATEST_GITHUB_RELEASE,
+    KIND_SERVICE_LATEST_REGISTRY_TAG,
+    KIND_SERVICE_LOG_COMMAND,
+    KIND_SERVICE_MEMORY,
+    KIND_SERVICE_PULL_TARGET_VERSION,
+    KIND_SERVICE_RUNNING_DIGEST,
+    KIND_SERVICE_STATE,
+    KIND_SERVICE_UPTIME,
+    KIND_SITE_TOTAL_CPU,
+    KIND_SITE_TOTAL_MEMORY,
+    KIND_STACK_COMPOSE_CONFIG,
+    KIND_STACK_STATE,
+    STACK_STATE_UPDATING,
+)
 from .container_totals import total_running_cpu_percent, total_running_memory_gb
 from .coordinator import LogFetchResult, PullError, StacksCoordinator
 from .engine import ContainerInfo
@@ -117,7 +136,7 @@ class StackStateSensor(StackDeviceEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         status = self._status
-        attrs: dict[str, Any] = stack_attributes(self.coordinator.site, self._stack_name)
+        attrs: dict[str, Any] = stack_attributes(self.coordinator.site, self._stack_name, KIND_STACK_STATE)
         if status:
             attrs["has_env_file"] = status.info.has_env_file
         # Surfaces a failed Pull update once the transient "updating" state
@@ -178,7 +197,7 @@ class StackComposeConfigSensor(StackDeviceEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        attrs = stack_attributes(self.coordinator.site, self._stack_name)
+        attrs = stack_attributes(self.coordinator.site, self._stack_name, KIND_STACK_COMPOSE_CONFIG)
         status = self._status
         if status is not None:
             attrs["compose_config"] = status.info.raw_compose_text
@@ -209,9 +228,10 @@ class _TotalContainerSensor(CoordinatorEntity[StacksCoordinator], SensorEntity):
 
     _attr_has_entity_name = False
 
-    def __init__(self, coordinator: StacksCoordinator, entry_id: str) -> None:
+    def __init__(self, coordinator: StacksCoordinator, entry_id: str, kind: str) -> None:
         super().__init__(coordinator)
         self._entry_id = entry_id
+        self._kind = kind
 
     def _all_containers(self) -> list[ContainerInfo]:
         return [
@@ -222,7 +242,7 @@ class _TotalContainerSensor(CoordinatorEntity[StacksCoordinator], SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
-        return {"site": self.coordinator.site}
+        return {"site": self.coordinator.site, "kind": self._kind}
 
 
 class TotalContainerCpuSensor(_TotalContainerSensor):
@@ -231,7 +251,7 @@ class TotalContainerCpuSensor(_TotalContainerSensor):
     _attr_icon = "mdi:chip"
 
     def __init__(self, coordinator: StacksCoordinator, entry_id: str) -> None:
-        super().__init__(coordinator, entry_id)
+        super().__init__(coordinator, entry_id, KIND_SITE_TOTAL_CPU)
         self._attr_unique_id = f"{entry_id}_total_container_cpu"
         self._attr_name = f"Total Container CPU {coordinator.site}"
 
@@ -247,7 +267,7 @@ class TotalContainerMemorySensor(_TotalContainerSensor):
     _attr_icon = "mdi:memory"
 
     def __init__(self, coordinator: StacksCoordinator, entry_id: str) -> None:
-        super().__init__(coordinator, entry_id)
+        super().__init__(coordinator, entry_id, KIND_SITE_TOTAL_MEMORY)
         self._attr_unique_id = f"{entry_id}_total_container_memory"
         self._attr_name = f"Total Container Memory {coordinator.site}"
 
@@ -258,10 +278,16 @@ class TotalContainerMemorySensor(_TotalContainerSensor):
 
 class _ServiceEntity(StackDeviceEntity):
     def __init__(
-        self, coordinator: StacksCoordinator, entry_id: str, stack_name: str, service_name: str
+        self,
+        coordinator: StacksCoordinator,
+        entry_id: str,
+        stack_name: str,
+        service_name: str,
+        kind: str,
     ) -> None:
         super().__init__(coordinator, entry_id, stack_name)
         self._service_name = service_name
+        self._kind = kind
         # Own device (not the stack's) so a service dropped from an edited
         # compose file can be pruned independently on reload — see
         # entity.py and __init__.py's stale-device cleanup.
@@ -281,14 +307,14 @@ class _ServiceEntity(StackDeviceEntity):
         # See SERVICE_ATTRIBUTES_SPEC.md. Base implementation — a
         # subclass that adds its own attributes merges into this rather
         # than replacing it (see e.g. ServiceStateSensor below).
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, self._kind)
 
 
 class ServiceStateSensor(_ServiceEntity, SensorEntity):
     _attr_icon = "mdi:docker"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(coordinator, entry_id, stack_name, service_name, KIND_SERVICE_STATE)
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_state"
         self._attr_name = f"{service_name} state"
 
@@ -314,7 +340,7 @@ class ServiceCpuSensor(_ServiceEntity, SensorEntity):
     _attr_icon = "mdi:chip"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(coordinator, entry_id, stack_name, service_name, KIND_SERVICE_CPU)
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_cpu"
         self._attr_name = f"{service_name} CPU"
 
@@ -337,7 +363,7 @@ class ServiceMemorySensor(_ServiceEntity, SensorEntity):
     _attr_icon = "mdi:memory"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(coordinator, entry_id, stack_name, service_name, KIND_SERVICE_MEMORY)
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_memory"
         self._attr_name = f"{service_name} memory"
 
@@ -365,7 +391,7 @@ class ServiceUptimeSensor(_ServiceEntity, SensorEntity):
     _attr_icon = "mdi:clock-outline"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(coordinator, entry_id, stack_name, service_name, KIND_SERVICE_UPTIME)
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_uptime"
         self._attr_name = f"{service_name} started at"
 
@@ -384,7 +410,7 @@ class ServiceLogCommandSensor(_ServiceEntity, SensorEntity):
     _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(coordinator, entry_id, stack_name, service_name, KIND_SERVICE_LOG_COMMAND)
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_log_command"
         self._attr_name = f"{service_name} log command"
 
@@ -421,7 +447,9 @@ class ServiceLastFetchedLogsSensor(_ServiceEntity, SensorEntity):
     _attr_icon = "mdi:text-box-search-outline"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(
+            coordinator, entry_id, stack_name, service_name, KIND_SERVICE_LAST_FETCHED_LOGS
+        )
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_last_fetched_logs"
         self._attr_name = f"{service_name} last fetched logs"
 
@@ -458,10 +486,12 @@ class _UpdateServiceEntity(CoordinatorEntity[UpdateCheckCoordinator]):
         entry_id: str,
         stack_name: str,
         service_name: str,
+        kind: str,
     ) -> None:
         super().__init__(coordinator)
         self._stack_name = stack_name
         self._service_name = service_name
+        self._kind = kind
         self._attr_device_info = service_device_info(
             entry_id, stack_name, service_name, coordinator.site
         )
@@ -475,7 +505,7 @@ class _UpdateServiceEntity(CoordinatorEntity[UpdateCheckCoordinator]):
     def extra_state_attributes(self) -> dict[str, Any]:
         # See SERVICE_ATTRIBUTES_SPEC.md. Base implementation, merged
         # into by a subclass that adds its own attributes.
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, self._kind)
 
 
 class ServiceRunningDigestSensor(_UpdateServiceEntity, SensorEntity):
@@ -484,7 +514,9 @@ class ServiceRunningDigestSensor(_UpdateServiceEntity, SensorEntity):
     _attr_icon = "mdi:pound-box-outline"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(
+            coordinator, entry_id, stack_name, service_name, KIND_SERVICE_RUNNING_DIGEST
+        )
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_running_digest"
         self._attr_name = f"{service_name} running digest"
 
@@ -512,7 +544,7 @@ class ServiceLastPulledSensor(_UpdateServiceEntity, SensorEntity):
     _attr_icon = "mdi:history"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(coordinator, entry_id, stack_name, service_name, KIND_SERVICE_LAST_PULLED)
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_last_pulled"
         self._attr_name = f"{service_name} last pulled"
 
@@ -575,10 +607,12 @@ class _TagWalkServiceEntity(CoordinatorEntity[TagWalkCoordinator]):
         entry_id: str,
         stack_name: str,
         service_name: str,
+        kind: str,
     ) -> None:
         super().__init__(coordinator)
         self._stack_name = stack_name
         self._service_name = service_name
+        self._kind = kind
         self._attr_device_info = service_device_info(
             entry_id, stack_name, service_name, coordinator.site
         )
@@ -590,7 +624,7 @@ class _TagWalkServiceEntity(CoordinatorEntity[TagWalkCoordinator]):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         # See SERVICE_ATTRIBUTES_SPEC.md.
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, self._kind)
 
 
 class ServiceLatestRegistryTagSensor(_TagWalkServiceEntity, SensorEntity):
@@ -608,7 +642,9 @@ class ServiceLatestRegistryTagSensor(_TagWalkServiceEntity, SensorEntity):
     _attr_icon = "mdi:tag-multiple-outline"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(
+            coordinator, entry_id, stack_name, service_name, KIND_SERVICE_LATEST_REGISTRY_TAG
+        )
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_latest_registry_tag"
         self._attr_name = f"{service_name} latest registry tag"
 
@@ -637,7 +673,9 @@ class ServicePullTargetVersionSensor(_TagWalkServiceEntity, SensorEntity):
     _attr_icon = "mdi:target"
 
     def __init__(self, coordinator, entry_id, stack_name, service_name) -> None:
-        super().__init__(coordinator, entry_id, stack_name, service_name)
+        super().__init__(
+            coordinator, entry_id, stack_name, service_name, KIND_SERVICE_PULL_TARGET_VERSION
+        )
         self._attr_unique_id = f"{entry_id}_{stack_name}_{service_name}_pull_target_version"
         self._attr_name = f"{service_name} pull target version"
 
@@ -689,7 +727,9 @@ class ServiceLatestGithubReleaseSensor(CoordinatorEntity[GitHubReleaseCoordinato
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         # stack/service (SERVICE_ATTRIBUTES_SPEC.md) are always present.
-        attrs = service_attributes(self._stack_name, self._service_name)
+        attrs = service_attributes(
+            self._stack_name, self._service_name, KIND_SERVICE_LATEST_GITHUB_RELEASE
+        )
         release = self._release
         if release is None:
             return attrs
@@ -741,4 +781,4 @@ class ServiceDetectedVersionSensor(CoordinatorEntity[GitHubReleaseCoordinator], 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         # See SERVICE_ATTRIBUTES_SPEC.md.
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, KIND_SERVICE_DETECTED_VERSION)

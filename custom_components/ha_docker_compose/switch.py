@@ -24,7 +24,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .compose import ComposeCommandError, ComposeExecutor
-from .const import DOMAIN, STACK_STATE_STOPPED
+from .const import DOMAIN, KIND_SERVICE_RUNNING_SWITCH, KIND_STACK_SWITCH, STACK_STATE_STOPPED
 from .coordinator import StacksCoordinator
 from .engine import ContainerInfo
 from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
@@ -89,7 +89,7 @@ class StackRunningSwitch(StackDeviceEntity, SwitchEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
-        return stack_attributes(self.coordinator.site, self._stack_name)
+        return stack_attributes(self.coordinator.site, self._stack_name, KIND_STACK_SWITCH)
 
     @property
     def is_on(self) -> bool | None:
@@ -165,7 +165,7 @@ class ServiceRunningSwitch(StackDeviceEntity, SwitchEntity):
         # entity_id. Always present (not gated behind coordinator data
         # availability): both values are known from construction, not
         # derived from a poll.
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, KIND_SERVICE_RUNNING_SWITCH)
 
     async def async_turn_on(self, **kwargs) -> None:
         status = self._status

@@ -56,3 +56,36 @@ COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 # LOGS_BUTTON_SPEC.md — deliberately not exposed as a config-flow option
 # unless it turns out to matter in practice.
 LOG_FETCH_TAIL_LINES = 100
+
+# One distinct, stable `kind` value per entity class, set via
+# stack_attributes()/service_attributes()/the site totals' own attribute —
+# see MULTI_SITE_IDENTITY_SPEC.md's dashboard-contract amendment. Replaces
+# icon-based discrimination in a dashboard (a user-customized icon would
+# otherwise break it): a dashboard resolves a specific entity on a device
+# by (device_id, kind) instead of (domain, icon). Never derived from or
+# equal to any icon/name string — a value here changing is a deliberate,
+# reviewed rename, not an incidental side effect of a display tweak.
+KIND_STACK_STATE = "stack_state"
+KIND_STACK_PULL_BUTTON = "stack_pull_button"
+KIND_STACK_CHECK_BUTTON = "stack_check_button"
+KIND_STACK_SWITCH = "stack_switch"
+KIND_STACK_UPDATE_AVAILABLE = "stack_update_available"
+KIND_STACK_COMPOSE_CONFIG = "stack_compose_config"
+KIND_SERVICE_STATE = "service_state"
+KIND_SERVICE_CPU = "service_cpu"
+KIND_SERVICE_MEMORY = "service_memory"
+KIND_SERVICE_UPTIME = "service_uptime"
+KIND_SERVICE_LOG_COMMAND = "service_log_command"
+KIND_SERVICE_LAST_FETCHED_LOGS = "service_last_fetched_logs"
+KIND_SERVICE_FETCH_LOGS_BUTTON = "service_fetch_logs_button"
+KIND_SERVICE_RESTART_BUTTON = "service_restart_button"
+KIND_SERVICE_RUNNING_SWITCH = "service_running_switch"
+KIND_SERVICE_UPDATE_AVAILABLE = "service_update_available"
+KIND_SERVICE_RUNNING_DIGEST = "service_running_digest"
+KIND_SERVICE_LAST_PULLED = "service_last_pulled"
+KIND_SERVICE_LATEST_REGISTRY_TAG = "service_latest_registry_tag"
+KIND_SERVICE_PULL_TARGET_VERSION = "service_pull_target_version"
+KIND_SERVICE_LATEST_GITHUB_RELEASE = "service_latest_github_release"
+KIND_SERVICE_DETECTED_VERSION = "service_detected_version"
+KIND_SITE_TOTAL_CPU = "site_total_cpu"
+KIND_SITE_TOTAL_MEMORY = "site_total_memory"

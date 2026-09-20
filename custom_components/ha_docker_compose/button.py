@@ -33,7 +33,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .compose import ComposeCommandError, ComposeExecutor
-from .const import DOMAIN, LOG_FETCH_TAIL_LINES
+from .const import (
+    DOMAIN,
+    KIND_SERVICE_FETCH_LOGS_BUTTON,
+    KIND_SERVICE_RESTART_BUTTON,
+    KIND_STACK_CHECK_BUTTON,
+    KIND_STACK_PULL_BUTTON,
+    LOG_FETCH_TAIL_LINES,
+)
 from .coordinator import LogFetchResult, StacksCoordinator
 from .engine import ContainerLogsUnavailableError, DockerEngineClient
 from .entity import StackDeviceEntity, service_attributes, service_device_info, stack_attributes
@@ -124,7 +131,7 @@ class StackPullUpdateButton(StackDeviceEntity, ButtonEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
-        return stack_attributes(self.coordinator.site, self._stack_name)
+        return stack_attributes(self.coordinator.site, self._stack_name, KIND_STACK_PULL_BUTTON)
 
     async def async_press(self) -> None:
         # Unconditional, before anything else can short-circuit: if this
@@ -191,7 +198,7 @@ class StackCheckUpdatesButton(StackDeviceEntity, ButtonEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
-        return stack_attributes(self.coordinator.site, self._stack_name)
+        return stack_attributes(self.coordinator.site, self._stack_name, KIND_STACK_CHECK_BUTTON)
 
     async def async_press(self) -> None:
         _LOGGER.info("StackCheckUpdatesButton.async_press() called for stack '%s'", self._stack_name)
@@ -241,7 +248,7 @@ class ServiceFetchLogsButton(StackDeviceEntity, ButtonEntity):
     @property
     def extra_state_attributes(self) -> dict[str, str]:
         # See SERVICE_ATTRIBUTES_SPEC.md.
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, KIND_SERVICE_FETCH_LOGS_BUTTON)
 
     async def async_press(self) -> None:
         _LOGGER.info(
@@ -309,7 +316,7 @@ class ServiceRestartButton(StackDeviceEntity, ButtonEntity):
     @property
     def extra_state_attributes(self) -> dict[str, str]:
         # See SERVICE_ATTRIBUTES_SPEC.md.
-        return service_attributes(self._stack_name, self._service_name)
+        return service_attributes(self._stack_name, self._service_name, KIND_SERVICE_RESTART_BUTTON)
 
     async def async_press(self) -> None:
         _LOGGER.info(

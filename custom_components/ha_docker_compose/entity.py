@@ -61,19 +61,27 @@ def service_device_info(
     )
 
 
-def stack_attributes(site: str, stack_name: str) -> dict[str, str]:
-    """The `site`/`stack` attribute pair every stack-level entity exposes
-    — same rationale as service_attributes() below, and deliberately the
-    same shape (a plain function each entity calls and merges into its own
-    dict, not a base-class property): none of the entities this is used
-    from currently chain into `super().extra_state_attributes`, and two of
-    them (StackUpdateAvailableSensor, on UpdateCheckCoordinator) don't
-    even share a base class with the rest — see MULTI_SITE_IDENTITY_SPEC.md."""
-    return {"site": site, "stack": stack_name}
+def stack_attributes(site: str, stack_name: str, kind: str) -> dict[str, str]:
+    """The `site`/`stack`/`kind` attributes every stack-level entity
+    exposes — same rationale as service_attributes() below, and
+    deliberately the same shape (a plain function each entity calls and
+    merges into its own dict, not a base-class property): none of the
+    entities this is used from currently chain into
+    `super().extra_state_attributes`, and two of them
+    (StackUpdateAvailableSensor, on UpdateCheckCoordinator) don't even
+    share a base class with the rest — see MULTI_SITE_IDENTITY_SPEC.md.
+
+    `kind` (one of const.py's KIND_* constants) is a stable, per-entity-
+    class discriminator for dashboard code: (device_id, kind) identifies
+    a specific entity on a device without relying on icon (a user can
+    customize an icon in the UI, silently breaking icon-based matching)
+    or on parsing the generated name/entity_id.
+    """
+    return {"site": site, "stack": stack_name, "kind": kind}
 
 
-def service_attributes(stack_name: str, service_name: str) -> dict[str, str]:
-    """The `stack`/`service` attribute pair every per-service entity
+def service_attributes(stack_name: str, service_name: str, kind: str) -> dict[str, str]:
+    """The `stack`/`service`/`kind` attributes every per-service entity
     exposes — plain, un-doubled values, so dashboard code never needs to
     reverse-engineer either by parsing entity_id. See
     SERVICE_ATTRIBUTES_SPEC.md: entity_id-based parsing is fragile
@@ -81,11 +89,13 @@ def service_attributes(stack_name: str, service_name: str) -> dict[str, str]:
     string-prefix collision exists (music_assistant vs.
     music_assistant_backup) — a plain literal attribute removes the need
     for any client-side parsing/guessing at all. One canonical place for
-    the two key names, used consistently by every per-service entity
-    across sensor.py/switch.py/button.py/binary_sensor.py, rather than
-    the key names being repeated (and risking drift) at every call site.
+    the key names, used consistently by every per-service entity across
+    sensor.py/switch.py/button.py/binary_sensor.py, rather than the key
+    names being repeated (and risking drift) at every call site.
+
+    `kind` — see stack_attributes()'s docstring for the same rationale.
     """
-    return {"stack": stack_name, "service": service_name}
+    return {"stack": stack_name, "service": service_name, "kind": kind}
 
 
 class StackDeviceEntity(CoordinatorEntity[StacksCoordinator]):

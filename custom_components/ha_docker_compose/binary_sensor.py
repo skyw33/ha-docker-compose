@@ -21,7 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, KIND_SERVICE_UPDATE_AVAILABLE, KIND_STACK_UPDATE_AVAILABLE
 from .coordinator import StacksCoordinator
 from .entity import service_attributes, service_device_info, stack_attributes, stack_device_info
 from .update_coordinator import ServiceUpdateStatus, UpdateCheckCoordinator
@@ -95,7 +95,7 @@ class ServiceUpdateAvailableSensor(CoordinatorEntity[UpdateCheckCoordinator], Bi
         # stack/service (SERVICE_ATTRIBUTES_SPEC.md) are always present —
         # known from construction, not derived from coordinator data —
         # even when there's no status yet to report the rest.
-        attrs = service_attributes(self._stack_name, self._service_name)
+        attrs = service_attributes(self._stack_name, self._service_name, KIND_SERVICE_UPDATE_AVAILABLE)
         status = self._status
         if status is None:
             return attrs
@@ -133,7 +133,7 @@ class StackUpdateAvailableSensor(CoordinatorEntity[UpdateCheckCoordinator], Bina
 
     @property
     def extra_state_attributes(self) -> dict[str, str]:
-        return stack_attributes(self._site, self._stack_name)
+        return stack_attributes(self._site, self._stack_name, KIND_STACK_UPDATE_AVAILABLE)
 
     @property
     def is_on(self) -> bool | None:

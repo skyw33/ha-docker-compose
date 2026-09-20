@@ -25,7 +25,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, STACK_STATE_UPDATING
-from .coordinator import LogFetchResult, StacksCoordinator
+from .coordinator import LogFetchResult, PullError, StacksCoordinator
 from .engine import ContainerInfo
 from .entity import StackDeviceEntity, service_attributes, service_device_info
 from .github_coordinator import GitHubReleaseCoordinator, ServiceMetadata
@@ -107,11 +107,26 @@ class StackStateSensor(StackDeviceEntity, SensorEntity):
         return status.state if status else None
 
     @property
+    def _pull_error(self) -> PullError | None:
+        return self.coordinator.last_pull_errors.get(self._stack_name)
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         status = self._status
-        if status is None:
-            return {}
-        return {"has_env_file": status.info.has_env_file}
+        attrs: dict[str, Any] = {"has_env_file": status.info.has_env_file} if status else {}
+        # Surfaces a failed Pull update once the transient "updating" state
+        # above has already reverted — without this, a real, logged
+        # failure (bad tag, registry rate limit, sidecar lost track of the
+        # exec, ...) looked identical to a success: state just quietly went
+        # back to "running"/"stopped" with nothing to tell them apart. See
+        # PullError / PULL_ERROR_VISIBILITY_SPEC.md. Cleared by the next
+        # Pull press, not by time or by a later successful poll.
+        pull_error = self._pull_error
+        if pull_error is not None:
+            attrs["last_pull_error"] = pull_error.reason
+            attrs["last_pull_error_step"] = pull_error.step
+            attrs["last_pull_error_at"] = pull_error.failed_at.isoformat()
+        return attrs
 
 
 class StackComposeConfigSensor(StackDeviceEntity, SensorEntity):

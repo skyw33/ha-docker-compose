@@ -52,6 +52,25 @@ class StackStatus:
 
 
 @dataclass
+class PullError:
+    """Most recent Pull update failure for a stack, if any — see
+    PULL_ERROR_VISIBILITY_SPEC.md. Before this, a failure that occurred
+    after PullJobRunner.start() returned (i.e. everything from
+    _drive()/_wait_for_step() onward — a failed pull/up command, a lost
+    exec, a sidecar timeout) was only ever logged, with the dashboard
+    silently reverting from the transient "updating" state back to the
+    stale prior state — no different, from the user's perspective, than
+    success. Cleared at the start of a fresh Pull press (an old failure
+    shouldn't linger once the user retries) and set by PullJobRunner
+    wherever it currently logs a WARNING/ERROR and ends the job any way
+    other than success."""
+
+    failed_at: datetime
+    step: str
+    reason: str
+
+
+@dataclass
 class LogFetchResult:
     """One service's most recent Fetch logs snapshot — see
     FETCH_LOGS_ATTRIBUTE_SPEC.md. Overwritten in place on every button
@@ -97,6 +116,12 @@ class StacksCoordinator(DataUpdateCoordinator[dict[str, "StackStatus"]]):
         # without _derive_stack_state ever overwriting it — see sensor.py.
         # In-memory only, never persisted; a restart naturally clears it.
         self.pulling_stacks: set[str] = set()
+        # Most recent Pull update failure per stack, if any — set/cleared by
+        # PullJobRunner (pull_jobs.py), read by StackStateSensor. Same
+        # live-UI-only rationale as pulling_stacks above: not part of
+        # `.data`, not persisted, a restart naturally clears it. See
+        # PULL_ERROR_VISIBILITY_SPEC.md.
+        self.last_pull_errors: dict[str, PullError] = {}
         # Most recent Fetch logs result per (stack, service) — set by
         # ServiceFetchLogsButton (button.py), read by
         # ServiceLastFetchedLogsSensor (sensor.py). Same live-UI-only

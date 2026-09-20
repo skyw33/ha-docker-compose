@@ -32,10 +32,11 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .compose import ComposeCommandError, ComposeExecutor
 from .const import DOMAIN
-from .coordinator import StacksCoordinator
+from .coordinator import PullError, StacksCoordinator
 from .engine import DockerEngineClient, ExecNotFoundError, SidecarNotAvailableError
 from .image_ref import tag as image_tag
 from .storage import DigestHistoryStore
@@ -126,6 +127,10 @@ class PullJobRunner:
         _LOGGER.info("PullJobRunner.start() called for stack '%s'", stack_name)
 
         self._coordinator.pulling_stacks.add(stack_name)
+        # A fresh press supersedes whatever the last attempt recorded — an
+        # old failure shouldn't linger on the dashboard once the user
+        # retries (see PullError / PULL_ERROR_VISIBILITY_SPEC.md).
+        self._coordinator.last_pull_errors.pop(stack_name, None)
         self._coordinator.async_update_listeners()
 
         try:
@@ -195,37 +200,31 @@ class PullJobRunner:
             exec_id,
         )
         try:
-            success = await self._wait_for_step(stack_name, step, exec_id, log_path)
+            failure_reason = await self._wait_for_step(stack_name, step, exec_id, log_path)
         except ExecNotFoundError:
-            _LOGGER.error(
-                "Pull update for stack '%s': lost track of the in-flight '%s' command (the "
-                "sidecar container itself most likely restarted, dropping its exec state) — "
-                "outcome unknown, giving up on this job rather than guessing",
-                stack_name,
-                step,
+            reason = (
+                f"Lost track of the in-flight '{step}' command (the sidecar container itself "
+                "most likely restarted, dropping its exec state) — outcome unknown"
             )
-            await self._end_job(stack_name)
+            _LOGGER.error("Pull update for stack '%s': %s", stack_name, reason)
+            await self._end_job(stack_name, error=PullError(dt_util.utcnow(), step, reason))
             return
 
-        if not success:
-            # Failure already logged in _wait_for_step with the command's
-            # captured output; no update-check refresh on a failed job,
-            # same condition that already gated the digest-history write
-            # before this spec.
-            await self._end_job(stack_name)
+        if failure_reason is not None:
+            # Full detail (captured command output) already logged in
+            # _wait_for_step; no update-check refresh on a failed job, same
+            # condition that already gated the digest-history write before
+            # this spec.
+            await self._end_job(stack_name, error=PullError(dt_util.utcnow(), step, failure_reason))
             return
 
         if step == STEP_PULL:
             try:
                 handle = await self._compose.start_detached(stack_dir, "up", "-d")
             except ComposeCommandError as err:
-                _LOGGER.warning(
-                    "Pull update for stack '%s': starting 'up -d' after a successful pull "
-                    "failed: %s",
-                    stack_name,
-                    err,
-                )
-                await self._end_job(stack_name)
+                reason = f"Starting 'up -d' after a successful pull failed: {err}"
+                _LOGGER.warning("Pull update for stack '%s': %s", stack_name, reason)
+                await self._end_job(stack_name, error=PullError(dt_util.utcnow(), "up", reason))
                 return
 
             await self._job_store.async_set(stack_name, STEP_UP, handle.exec_id, handle.log_path)
@@ -235,7 +234,12 @@ class PullJobRunner:
         # step == STEP_UP and it succeeded: the full pull+recreate is done.
         await self._finish_success(stack_name)
 
-    async def _wait_for_step(self, stack_name: str, step: str, exec_id: str, log_path: str) -> bool:
+    async def _wait_for_step(
+        self, stack_name: str, step: str, exec_id: str, log_path: str
+    ) -> str | None:
+        """Returns None on success, or a human-readable failure reason
+        string (also what ends up in PullError.reason / the
+        last_pull_error attribute) on any non-success outcome."""
         elapsed = 0.0
         while True:
             try:
@@ -253,41 +257,35 @@ class PullJobRunner:
                 await asyncio.sleep(POLL_INTERVAL)
                 elapsed += POLL_INTERVAL
                 if elapsed >= MAX_WAIT_SECONDS:
-                    _LOGGER.error(
-                        "Pull update for stack '%s': could not reach the sidecar to check on "
-                        "the '%s' step for %.0fs — giving up watching it",
-                        stack_name,
-                        step,
-                        MAX_WAIT_SECONDS,
+                    reason = (
+                        f"Could not reach the sidecar to check on the '{step}' step for "
+                        f"{MAX_WAIT_SECONDS:.0f}s — giving up watching it"
                     )
-                    return False
+                    _LOGGER.error("Pull update for stack '%s': %s", stack_name, reason)
+                    return reason
                 continue
 
             if not result.running:
                 if result.exit_code == 0:
-                    return True
+                    return None
                 log = await self._compose.read_log(log_path)
-                _LOGGER.warning(
-                    "Pull update for stack '%s': '%s' step failed (exit %s): %s",
-                    stack_name,
-                    step,
-                    result.exit_code,
-                    log.strip() or "(no output captured)",
+                reason = (
+                    f"'{step}' step failed (exit {result.exit_code}): "
+                    f"{log.strip() or '(no output captured)'}"
                 )
-                return False
+                _LOGGER.warning("Pull update for stack '%s': %s", stack_name, reason)
+                return reason
 
             await asyncio.sleep(POLL_INTERVAL)
             elapsed += POLL_INTERVAL
             if elapsed >= MAX_WAIT_SECONDS:
-                _LOGGER.error(
-                    "Pull update for stack '%s': '%s' step still running after %.0fs — no "
-                    "longer watching it (it may still complete in the sidecar; check manually "
-                    "if this persists)",
-                    stack_name,
-                    step,
-                    MAX_WAIT_SECONDS,
+                reason = (
+                    f"'{step}' step still running after {MAX_WAIT_SECONDS:.0f}s — no longer "
+                    "watching it (it may still complete in the sidecar; check manually if this "
+                    "persists)"
                 )
-                return False
+                _LOGGER.error("Pull update for stack '%s': %s", stack_name, reason)
+                return reason
 
     async def _finish_success(self, stack_name: str) -> None:
         stack = next((s for s in self._coordinator.stacks if s.name == stack_name), None)
@@ -368,7 +366,9 @@ class PullJobRunner:
 
         _LOGGER.info("Pull update for stack '%s' completed successfully", stack_name)
 
-    async def _end_job(self, stack_name: str) -> None:
+    async def _end_job(self, stack_name: str, *, error: PullError | None = None) -> None:
+        if error is not None:
+            self._coordinator.last_pull_errors[stack_name] = error
         await self._job_store.async_clear(stack_name)
         self._coordinator.pulling_stacks.discard(stack_name)
         self._coordinator.async_update_listeners()

@@ -44,30 +44,31 @@ the real socket (read-only), and it only forwards the specific API endpoint
 groups it's configured to allow (see below) — a compromised HA or sidecar
 container can't do anything the proxy wasn't explicitly told to permit.
 
-**The proxy's port must stay bound to `127.0.0.1` only** (`"127.0.0.1:2375:2375"`,
-never `"2375:2375"` or a LAN-reachable interface) — that binding is what
-makes it safe for a host-networked HA to reach it over loopback while
-staying unreachable from anywhere else on the network. Double-check this
-after any compose-file edit; it's the one line in this setup where a typo
-has real security consequences.
+**The proxy's port binding is the one line in this setup where a typo has
+real security consequences** — double-check it after any compose-file
+edit. For HA on the *same* host (the default, `network_mode: host`),
+bind to loopback only: `"127.0.0.1:2375:2375"`, never a bare
+`"2375:2375"`. For HA on a *separate* host (multiple sites, one config
+entry per Docker host — see the main README), loopback can't work, so
+bind to this machine's own LAN address instead and firewall it to the HA
+host specifically, not the whole network — see
+`example-stacks/docker-infra/docker-compose.yml`'s `ports:` comments for
+both cases, and the main README's "Using docker-socket-proxy" section for
+why: with `CONTAINERS`, `EXEC` and `POST` all enabled (required either
+way), anything that can reach this port can run commands in your
+containers — effectively control of the host.
 
 ## Proxy permissions
 
 `docker-socket-proxy` is allow-list-only: every endpoint group defaults to
-disabled unless its environment variable is set to `1`. Current minimum
-required by this integration:
-
-| Variable | Why |
-|---|---|
-| `CONTAINERS=1` | list/inspect containers — stats/state polling |
-| `EXEC=1` | Docker exec into the sidecar |
-| `IMAGES=1` | local image digest inspection — update-check comparison |
-| `POST=1` | required for *any* state-changing call (start/stop/restart act via POST) — without this the proxy is read-only regardless of the other flags |
-
-Do not enable additional groups (`VOLUMES`, `NETWORKS`, `SWARM`,
-`PLUGINS`, `SYSTEM`, etc.) speculatively. If something breaks with a 403
-from the proxy, find the specific endpoint group that call needs (see
-`docker-socket-proxy`'s own docs) and add only that one.
+disabled unless its environment variable is set to `1`. The full list of
+variables this integration and `docker compose` itself need — and why —
+lives in one place, the main README's ["Using
+docker-socket-proxy"](../../README.md#using-docker-socket-proxy) section;
+this file doesn't repeat it, to avoid the two drifting out of sync.
+`example-stacks/docker-infra/docker-compose.yml` already sets every
+variable from that table, so if you're using the example as-is there's
+nothing further to configure here.
 
 ## What you still need (unchanged from the sidecar-exec spec)
 

@@ -752,7 +752,6 @@ class ServiceLatestGithubReleaseSensor(CoordinatorEntity[GitHubReleaseCoordinato
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:github"
-    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,

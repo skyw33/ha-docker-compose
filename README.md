@@ -126,6 +126,12 @@ outside this integration's own code and not audited here).
 
 > **Security note:** with `CONTAINERS`, `EXEC` and `POST` all enabled — required for this integration to manage your stacks at all — anything that can reach the proxy's published port can run arbitrary commands inside your containers, which is effectively control of the host. Bind the published port to a specific interface or firewall it to the Home Assistant host only; never expose it beyond a trusted network.
 
+The example [`docker-infra`](docs/deploy/example-stacks/docker-infra/docker-compose.yml)
+compose file enables everything the integration and the sidecar need. If
+you write your own proxy configuration, also enable `NETWORKS` and
+`VOLUMES`, which `docker compose` uses to create a stack's networks and
+volumes.
+
 ## Polling
 
 Four independent poll cycles, each on the cadence its own data actually

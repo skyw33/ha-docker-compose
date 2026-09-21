@@ -62,6 +62,12 @@ repository:
 3. Install "Docker Compose Manager" from HACS, then restart Home
    Assistant and add it via **Settings → Devices & Services** as above.
 
+### Requirements
+
+Home Assistant Core **2024.4.0** or later (matches `hacs.json`) — the
+version that added config entries' "Reconfigure" action at all, which
+the site name field below depends on to be changeable after setup.
+
 ### Setup fields
 
 | Field | Meaning |
@@ -70,6 +76,19 @@ repository:
 | Docker host address | `tcp://host:port` or `unix:///path/to/docker.sock` — defaults to a local `docker-socket-proxy` on `tcp://127.0.0.1:2375`. |
 | Sidecar container name | The container this integration Docker-execs into to run `docker compose` commands. |
 | Poll interval | Fast stats/state poll cadence, in seconds (default 15). |
+| Site name | Optional — identifies this Docker host in device/entity names and dashboards (see [Naming](#naming) below). Left blank, one is derived from the stacks-root folder's name. If that default collides with another entry's site name, it's auto-suffixed (`docker`, `docker_2`, ...); an explicitly typed name that collides instead is rejected. |
+
+#### Changing the site name later
+
+Settings → Devices & Services → this entry's own menu → **Reconfigure**
+(added to config entries in Home Assistant 2024.4.0 — see Requirements
+above; exact wording/placement of the menu item isn't verified against
+every Home Assistant version here). Submitting a new value updates the
+entry's title and reloads it, which regenerates every stack's and
+service's *device* name to include the new site. It does **not** change
+any existing `entity_id` — those are assigned once, the first time an
+entity is created, and Home Assistant never changes them on its own
+afterward regardless of what the device name later becomes.
 
 ## Prerequisites
 
@@ -181,6 +200,42 @@ persisted across a restart: the check reruns from scratch on every HA
 start, so a value that was showing before a restart is gone (not just
 stale) until the next check succeeds.
 
+## Entities
+
+Two sensors per config entry, one per Docker host/site:
+
+| Entity | Unit | Meaning |
+|---|---|---|
+| `sensor.total_container_cpu_<site>` | % | Sum of every running container's `cpu_percent`, normalized against the *host's* CPU core count — 0–100%, comparable across hosts with different core counts. **This changed from earlier versions**, where this sensor summed per-container percentages directly (Docker's own convention, where 100% is one core) and could read as high as `cores × 100` on a multi-core host. |
+| `sensor.total_container_memory_<site>` | GB | Sum of every running container's memory usage. Unaffected by the CPU change above. |
+
+Both carry `site` (this entry's site name) and `kind`
+(`site_total_cpu` / `site_total_memory`) attributes. The CPU sensor also
+carries `cpu_cores` (the resolved host core count — omitted, not zero,
+when it can't be determined) and `cores_used` (the same running-container
+sum expressed as a plain core count, e.g. `1.5`, independent of whether
+`cpu_cores` could be resolved at all).
+
+Every other stack- and service-level entity carries `site` too (plus
+`stack`/`service` and a `kind` value unique to that entity type) — see
+[Example dashboard](#example-dashboard) below for how a dashboard uses
+these instead of parsing `entity_id`.
+
+## Naming
+
+Stack and service *device* names include the site, e.g. `jellyfin (nas)`
+and `jellyfin (nas) / jellyfin-server` — not just the stack or service
+name alone. This exists because two different Docker hosts can easily
+have a same-named stack or service (both might have a `jellyfin` stack),
+and without the site in the name, Home Assistant's device list would
+show two devices with an identical name and nothing to tell them apart.
+
+A newly created entity's `entity_id` is generated from its device's name
+at the moment it's first registered, so a freshly created entity's ID
+includes the site too (e.g. `sensor.jellyfin_nas_state`). This only
+affects entities created from here on — see "Upgrading from an earlier
+version" below for what happens to entities that already exist.
+
 ## Example dashboard
 
 [`docs/dashboard-examples/`](docs/dashboard-examples/) has an example
@@ -217,6 +272,38 @@ never needs to parse `entity_id` strings.
   supported for the update-tracking features (stack management itself is
   unaffected — it just means "update available"/"newest tag" data won't
   populate for those images).
+
+## Upgrading from an earlier version
+
+Verified directly against `__init__.py`'s `_resolve_site()` and the
+entity/unique-ID code paths, not assumed:
+
+- **On first load after upgrading**, an existing config entry with no
+  stored site name gets one computed from its stacks-root folder name
+  and written into that entry's options automatically — logged at `INFO`
+  level (`"Resolved and persisted site name ..."`). No action is
+  required for anything to keep working.
+- **Entity IDs and unique IDs are unchanged.** Nothing in this upgrade
+  touches either, so existing automations, dashboards and history keep
+  working against the same entity IDs as before.
+- **Device names update on that same first load** — every stack's and
+  service's device name is recomputed on every Home Assistant start or
+  reload, so the site suffix appears without any extra action on your
+  part.
+- **The config entry's title does not update automatically** — that only
+  happens via an explicit Reconfigure (see above) or by deleting and
+  re-adding the entry. An upgraded entry keeps its original title (the
+  stacks-root folder name) until you change it yourself.
+- If two existing entries happen to resolve to the same default site
+  name (e.g. identical stacks-root leaf folder names on two different
+  hosts), the one loading second logs a warning rather than failing or
+  silently overwriting anything — setup continues normally either way.
+  Give one of them an explicit site name via Reconfigure to clear the
+  warning.
+
+Not verified here: the exact appearance/wording of the Reconfigure menu
+item across every Home Assistant version — that's frontend behavior
+outside this repository, not something this repo's code or tests confirm.
 
 ## Development
 

@@ -161,9 +161,25 @@ already outdated and its newest available tag changes again while still
 outdated.
 
 Pressing **Check for Update (Registry)** on a stack bypasses every
-interval above at once — it forces an immediate digest check *and* tag
-walk for that stack, regardless of staleness, at the cost of the full
-per-tag registry traffic the scheduled sweep normally avoids.
+interval above at once *except* the GitHub release lookup — it forces an
+immediate digest check *and* tag walk for that stack, regardless of
+staleness, at the cost of the full per-tag registry traffic the scheduled
+sweep normally avoids, but doesn't touch `latest_github_release`, which
+isn't wired to this button.
+
+**The GitHub release lookup uses GitHub's unauthenticated API** (60
+requests/hour per IP, shared across every stack and service on that
+Docker host). It's enabled by default and checks every service with a
+resolvable `org.opencontainers.image.source` label independently each
+12-hour cycle — two services pointing at the same repo cost two requests,
+not one; there's no de-duplication across services sharing a repo. A
+rate-limited (or otherwise failing) check simply returns nothing for that
+service, logged at debug level, with no retry sooner than the next
+scheduled cycle — no backoff, and no manual retry button, since Check for
+Update (Registry) doesn't reach this lookup either. Nothing here is
+persisted across a restart: the check reruns from scratch on every HA
+start, so a value that was showing before a restart is gone (not just
+stale) until the next check succeeds.
 
 ## Example dashboard
 

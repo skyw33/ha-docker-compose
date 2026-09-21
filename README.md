@@ -168,16 +168,17 @@ per-tag registry traffic the scheduled sweep normally avoids.
 ## Example dashboard
 
 [`docs/dashboard-examples/`](docs/dashboard-examples/) has an example
-Lovelace dashboard: a stack overview grid plus a detail panel for
-whichever stack is selected. It needs an `input_text.selected_stack`
-helper entity and two HACS frontend cards
-([auto-entities](https://github.com/thomasloven/lovelace-auto-entities),
-[button-card](https://github.com/custom-cards/button-card)) — see that
-directory's own README for the details and a screenshot.
+Lovelace dashboard: a stack overview grid grouped by site, plus a detail
+panel for whichever stack is selected. It needs `custom:button-card`
+(the only HACS frontend card it uses) and two helper entities — see that
+directory's own README for the exact helper definitions, usage, and a
+screenshot.
 
-Every per-service entity already exposes plain `stack`/`service`
-attributes specifically to support a dashboard like this without any
-`entity_id` string-parsing.<img width="1076" height="569" alt="dashboard" src="https://github.com/user-attachments/assets/d58ba5a9-acc5-4f03-b70c-f06f799104f6" />
+Every stack- and service-level entity already exposes plain `site`/
+`stack`/`service`/`kind` attributes specifically so a dashboard like this
+never needs to parse `entity_id` strings.
+
+![Dashboard screenshot](docs/dashboard-examples/dashboard.png)
 
 
 ## Known limitations

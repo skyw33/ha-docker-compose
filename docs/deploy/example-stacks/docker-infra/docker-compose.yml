@@ -13,7 +13,7 @@
 # To update THIS stack, run on the host (not from Home Assistant):
 #   docker compose pull && docker compose up -d
 #
-# See README.md ("Using docker-socket-proxy") for what each variable allows.
+# See ../../../../README.md ("Using docker-socket-proxy") for what each variable allows.
 services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
@@ -63,7 +63,7 @@ services:
       # The whole stacks root, not just this folder: docker-cli runs `docker compose`
       # for every stack the integration manages. The left and right side must be
       # IDENTICAL to the real host path, and identical to the "stacks root" you enter
-      # when adding the integration. No docker.sock mount.
+      # when adding the integration. No docker.sock mount. See ../../README.md for why.
       - /opt/stacks:/opt/stacks
     restart: unless-stopped
     command: ["sleep", "infinity"]

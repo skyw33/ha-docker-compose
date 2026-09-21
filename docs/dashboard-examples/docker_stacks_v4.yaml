@@ -1,0 +1,1641 @@
+# HA Docker Compose Manager: "Docker Stacks" dashboard view
+#
+# Nothing in this file needs editing. Sites, stacks and containers are discovered from the
+# integration's own entities, so it works whatever you named your sites.
+#
+# Requirements
+#   1. custom:button-card (install from HACS)
+#   2. Two helpers. Create them under Settings > Devices & services > Helpers, or add this
+#      to configuration.yaml and restart:
+#
+#        input_text:
+#          selected_stack:
+#            name: Selected stack
+#            max: 255
+#        input_number:
+#          container_log_index:
+#            name: Container log index
+#            min: 0
+#            max: 99
+#            step: 1
+#            mode: box
+#
+# Install
+#   Edit dashboard > three-dot menu > Raw configuration editor, then paste everything below
+#   as a new item under `views:`. Do a hard refresh (Ctrl+Shift+R) after saving.
+#
+# Using it
+#   Tap a stack to select it. Right-click (or Ctrl-click, or long-press) a stack tile for its
+#   more-info dialog. The Reload button re-scans the compose files of that site only.
+
+type: sections
+max_columns: 4
+title: Docker Stacks
+path: docker-stacks-v4
+sections:
+- type: grid
+  cards:
+  - type: custom:button-card
+    show_name: false
+    show_icon: false
+    show_state: false
+    tap_action:
+      action: none
+    hold_action:
+      action: none
+    double_tap_action:
+      action: none
+    triggers_update: all
+    custom_fields:
+      content: |
+        [[[
+        const S = states;
+        const G = (window.__dcm = window.__dcm || {});
+        if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+        if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+        if (!G.byDev) {
+          G.byDev = {};
+          for (const e of Object.values(hass.entities)) {
+            if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+          }
+        }
+        if (!G.kids) {
+          G.kids = {};
+          for (const [id, d] of Object.entries(hass.devices)) {
+            if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+          }
+        }
+        const kindOf = (d, k) => {
+          for (const id of (G.byDev[d] || [])) {
+            if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+          }
+          return null;
+        };
+        const NAV_VER = 4;
+        if (!window.__dcmNavState || window.__dcmNavState.v !== NAV_VER) {
+          // Versioned, so a changed dashboard replaces the old handlers instead of being blocked by them.
+          const prev = window.__dcmNavState;
+          if (prev) {
+            window.removeEventListener('click', prev.click, true);
+            window.removeEventListener('touchend', prev.touch, prev.touchOpts);
+            if (prev.tstart) window.removeEventListener('touchstart', prev.tstart, prev.tstartOpts);
+            if (prev.ctx) window.removeEventListener('contextmenu', prev.ctx, true);
+          }
+          // HA's card action-handler cancels the default action of every click that reaches a card, so
+          // anything clickable inside a button-card's HTML is handled here, in the capture phase.
+          const haEl = () => document.querySelector('home-assistant');
+          const callSvc = (domain, service, data) => { const h = haEl(); if (h && h.hass) h.hass.callService(domain, service, data); };
+          const moreInfo = (node, entityId) => node.dispatchEvent(new CustomEvent('hass-more-info', { detail: { entityId: entityId }, bubbles: true, composed: true }));
+          const hideTip = () => { const t = document.getElementById('dcm-tip'); if (t) t.remove(); };
+          const toggleTip = (node) => {
+            const text = node.dataset.dcmTip;
+            const r = node.getBoundingClientRect();
+            const key = text + '|' + Math.round(r.top) + '|' + Math.round(r.left);
+            const old = document.getElementById('dcm-tip');
+            if (old) { const same = old.dataset.key === key; old.remove(); if (same) return; }
+            const el = document.createElement('div');
+            el.id = 'dcm-tip';
+            el.dataset.key = key;
+            el.textContent = text;
+            el.style.cssText = 'position:fixed;z-index:99999;max-width:260px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.4;background:var(--card-background-color,#202020);color:var(--primary-text-color,#fff);border:1px solid var(--divider-color,#555);box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+            document.body.appendChild(el);
+            const w = el.offsetWidth, h = el.offsetHeight;
+            el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+            el.style.top = ((r.bottom + 6 + h > window.innerHeight) ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+          };
+          const go = (path) => {
+            if (window.location.pathname === path) return;
+            const ha = haEl();
+            const before = ha && ha.hass ? ha.hass.panelUrl : null;
+            window.history.pushState(null, '', path);
+            window.dispatchEvent(new CustomEvent('location-changed', { detail: { replace: false }, bubbles: true, composed: true }));
+            // if HA's router didn't pick the change up, fall back to a normal page load
+            setTimeout(() => {
+              const now = ha && ha.hass ? ha.hass.panelUrl : null;
+              if (!ha || now === before) window.location.assign(path);
+            }, 600);
+          };
+          const KEYS = ['dcmTip', 'dcmPath', 'dcmSelect', 'dcmMore', 'dcmReload'];
+          const scan = (ev) => {
+            for (const n of (ev.composedPath ? ev.composedPath() : [])) {
+              if (n && n.dataset) { for (const k of KEYS) { if (n.dataset[k]) return { key: k, node: n }; } }
+            }
+            return null;
+          };
+          const act = (hit, ev) => {
+            const n = hit.node, v = n.dataset[hit.key];
+            const modified = ev.ctrlKey || ev.metaKey || ev.shiftKey;
+            if (hit.key === 'dcmTip') toggleTip(n);
+            else if (hit.key === 'dcmPath') { if (modified) window.open(v, '_blank'); else go(v); }
+            else if (hit.key === 'dcmSelect') {
+              if (modified) moreInfo(n, v);
+              else callSvc('input_text', 'set_value', { entity_id: 'input_text.selected_stack', value: v });
+            }
+            else if (hit.key === 'dcmMore') moreInfo(n, v);
+            else if (hit.key === 'dcmReload') {
+              if (window.confirm(n.dataset.dcmConfirm || 'Reload?')) callSvc('homeassistant', 'reload_config_entry', { entity_id: v });
+            }
+          };
+          let ts = null;
+          const onStart = (ev) => { const t = ev.touches && ev.touches[0]; ts = t ? { x: t.clientX, y: t.clientY, at: Date.now() } : null; };
+          const onClick = (ev) => {
+            const hit = scan(ev);
+            if (!hit) { hideTip(); return; }
+            ev.stopPropagation();
+            ev.preventDefault();
+            if (hit.key !== 'dcmTip') hideTip();
+            act(hit, ev);
+          };
+          const onTouch = (ev) => {
+            const hit = scan(ev);
+            if (!hit) return;
+            const t = ev.changedTouches && ev.changedTouches[0];
+            if (ts && t && (Math.abs(t.clientX - ts.x) > 10 || Math.abs(t.clientY - ts.y) > 10)) return; // a scroll, not a tap
+            if (ts && Date.now() - ts.at > 500) return; // a long press: the context menu takes it
+            ev.stopPropagation();
+            ev.preventDefault();
+            if (hit.key !== 'dcmTip') hideTip();
+            act(hit, ev);
+          };
+          const onCtx = (ev) => {
+            const hit = scan(ev);
+            if (!hit || hit.key !== 'dcmSelect') return;
+            ev.stopPropagation();
+            ev.preventDefault();
+            moreInfo(hit.node, hit.node.dataset.dcmSelect);
+          };
+          const touchOpts = { capture: true, passive: false };
+          const tstartOpts = { capture: true, passive: true };
+          window.addEventListener('click', onClick, true);
+          window.addEventListener('touchend', onTouch, touchOpts);
+          window.addEventListener('touchstart', onStart, tstartOpts);
+          window.addEventListener('contextmenu', onCtx, true);
+          window.__dcmNavState = { v: NAV_VER, click: onClick, touch: onTouch, touchOpts: touchOpts, tstart: onStart, tstartOpts: tstartOpts, ctx: onCtx };
+        }
+        const DOMAIN = 'ha_docker_compose';
+        const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const pretty = (slug) => String(slug || 'Docker').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+        // only look at this integration's entities (registry data is cached until it changes)
+        if (G.OE !== hass.entities) { G.OE = hass.entities; G.own = null; }
+        if (!G.own) {
+          G.own = Object.keys(hass.entities).filter((id) => hass.entities[id].platform === DOMAIN);
+          if (!G.own.length) G.own = Object.keys(S).filter((id) => S[id].attributes && S[id].attributes.kind);
+        }
+        const selHelper = S['input_text.selected_stack'];
+        const selected = selHelper ? selHelper.state : '';
+        const stacks = [];
+        const totals = {};
+        for (const id of G.own) {
+          const st = S[id];
+          if (!st || !st.attributes) continue;
+          const k = st.attributes.kind;
+          if (k === 'stack_state') stacks.push({ id: id, name: st.attributes.stack || id, site: st.attributes.site || '', state: st.state, dev: hass.entities[id] && hass.entities[id].device_id });
+          else if (k === 'site_total_cpu' || k === 'site_total_memory') { const site = st.attributes.site || ''; (totals[site] = totals[site] || {})[k] = id; }
+        }
+        const siteNames = Array.from(new Set(Object.keys(totals).concat(stacks.map((x) => x.site)))).sort((x, y) => x.localeCompare(y));
+        if (!stacks.length && !siteNames.length) return '<div class="dcm-empty" style="color:var(--secondary-text-color);font-size:12px;"><em>No Docker Compose Manager stacks found. Add the integration first.</em></div>';
+        const multi = siteNames.length > 1;
+        const isActive = (x) => x.state === 'running' || x.state === 'updating' || x.state === 'partial';
+        const byName = (x, y) => x.name.localeCompare(y.name);
+        const updState = (x) => { const uid = kindOf(x.dev, 'stack_update_available'); const u = uid ? S[uid] : null; return (u && u.state !== 'unknown' && u.state !== 'unavailable') ? u.state : null; };
+        const ICONS = { running: ['mdi:play-circle', 'var(--success-color, green)'], updating: ['mdi:progress-clock', 'var(--info-color, #378ADD)'], partial: ['mdi:alert-circle', 'var(--warning-color, #FAC775)'] };
+        const tile = (x, showSite) => {
+          const ic = ICONS[x.state] || ['mdi:stop-circle', 'var(--disabled-text-color, grey)'];
+          const u = updState(x);
+          const bits = [];
+          if (showSite) bits.push(esc(pretty(x.site)));
+          if (u === 'on') bits.push('update available'); else if (u === 'off') bits.push('up to date');
+          return '<div class="dcm-tile' + (selected === x.id ? ' dcm-sel' : '') + '" data-dcm-select="' + esc(x.id) + '">'
+            + (u === 'on' ? '<ha-icon class="dcm-badge" icon="mdi:arrow-up-bold-circle"></ha-icon>' : '')
+            + '<ha-icon icon="' + ic[0] + '" style="color:' + ic[1] + ';--mdc-icon-size:24px;"></ha-icon>'
+            + '<div class="dcm-name">' + esc(x.name) + '</div>'
+            + (bits.length ? '<div class="dcm-label">' + bits.join(' &middot; ') + '</div>' : '')
+            + '</div>';
+        };
+        const fmt = (id) => {
+          const t = id ? S[id] : null;
+          if (!t || t.state === 'unknown' || t.state === 'unavailable') return 'n/a';
+          const u = t.attributes.unit_of_measurement;
+          return esc(t.state + (u ? ' ' + u : ''));
+        };
+        const btn = (icon, name, value, attrs, one) => '<div class="dcm-btn' + (one ? ' dcm-one' : '') + (attrs ? '' : ' dcm-off') + '" ' + attrs + '>'
+          + '<ha-icon icon="' + icon + '" style="--mdc-icon-size:26px;"></ha-icon>'
+          + '<div class="dcm-btn-t"><div class="dcm-btn-n">' + name + '</div>' + (value === null ? '' : '<div class="dcm-btn-v">' + value + '</div>') + '</div></div>';
+        const css = '<style>'
+          + '.dcm-h{font-size:1.15em;font-weight:500;margin:4px 2px 8px;}'
+          + '.dcm-h.dcm-sub{margin-top:16px;}'
+          + '.dcm-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px;}'
+          + '.dcm-btn,.dcm-tile{box-sizing:border-box;border-radius:var(--ha-card-border-radius,12px);border:1px solid var(--ha-card-border-color,var(--divider-color,#444));background:var(--ha-card-background,var(--card-background-color,#202020));cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .15s;}'
+          + '.dcm-btn:hover,.dcm-tile:hover{background:var(--secondary-background-color,#2a2a2a);}'
+          + '.dcm-btn{height:52px;padding:6px 12px;display:flex;align-items:center;gap:10px;text-align:left;min-width:0;}'
+          + '.dcm-btn.dcm-off{opacity:.4;pointer-events:none;}'
+          + '.dcm-btn-t{min-width:0;}'
+          + '.dcm-btn-n{font-size:11px;color:var(--secondary-text-color);}'
+          + '.dcm-btn-v{font-size:15px;font-weight:500;white-space:nowrap;}'
+          + '.dcm-btn.dcm-one .dcm-btn-n{font-size:14px;color:var(--primary-text-color);}'
+          + '.dcm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-bottom:8px;}'
+          + '.dcm-tile{position:relative;min-height:70px;padding:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:2px;}'
+          + '.dcm-tile.dcm-sel{border:2px solid var(--primary-color);box-shadow:0 0 0 2px var(--primary-color);}'
+          + '.dcm-name{font-size:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}'
+          + '.dcm-label{font-size:11px;color:var(--secondary-text-color);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}'
+          + '.dcm-badge{position:absolute;top:6px;right:6px;--mdc-icon-size:16px;color:var(--warning-color,#FAC775);}'
+          + '.dcm-empty{color:var(--secondary-text-color);font-size:12px;margin:0 2px 8px;}'
+          + '</style>';
+        let out = css + '<div style="text-align:left;">';
+        for (const site of siteNames) {
+          const tot = totals[site] || {};
+          const mine = stacks.filter((x) => x.site === site).sort(byName);
+          const active = mine.filter(isActive);
+          // reloading any entity of a config entry reloads the whole entry (= this site)
+          const target = tot.site_total_cpu || tot.site_total_memory || (mine[0] && mine[0].id) || '';
+          const reload = target ? 'data-dcm-reload="' + esc(target) + '" data-dcm-confirm="' + esc('Reload all stacks on ' + pretty(site) + '? This re-scans every compose file on that host.') + '"' : '';
+          const more = (id) => id ? 'data-dcm-more="' + esc(id) + '"' : '';
+          out += '<div class="dcm-h">' + esc(pretty(site)) + '</div>'
+            + '<div class="dcm-row">'
+            + btn('mdi:refresh', 'Reload', null, reload, true)
+            + btn('mdi:cpu-64-bit', 'CPU', fmt(tot.site_total_cpu), more(tot.site_total_cpu), false)
+            + btn('mdi:memory', 'RAM', fmt(tot.site_total_memory), more(tot.site_total_memory), false)
+            + '</div>'
+            + (active.length ? '<div class="dcm-grid">' + active.map((x) => tile(x, false)).join('') + '</div>' : '<div class="dcm-empty">No running stacks.</div>');
+        }
+        const inactive = stacks.filter((x) => !isActive(x)).sort((x, y) => (x.site.localeCompare(y.site)) || byName(x, y));
+        if (inactive.length) out += '<div class="dcm-h dcm-sub">Inactive Stacks</div><div class="dcm-grid">' + inactive.map((x) => tile(x, multi)).join('') + '</div>';
+        return out + '</div>';
+        ]]]
+    styles:
+      grid:
+      - grid-template-areas: '"content"'
+      - grid-template-columns: 1fr
+      card:
+      - padding: 12px
+      - text-align: left
+      - cursor: default
+      - padding: '0'
+      - background: none
+      - border: none
+      - box-shadow: none
+      custom_fields:
+        content:
+        - display: block
+        - justify-self: stretch
+        - width: 100%
+        - min-width: '0'
+        - text-align: left
+        - pointer-events: auto
+        - user-select: text
+    grid_options:
+      columns: 12
+  column_span: 1
+- type: grid
+  cards:
+  - type: vertical-stack
+    grid_options:
+      columns: 12
+    cards:
+    - type: custom:button-card
+      triggers_update:
+      - input_text.selected_stack
+      show_name: false
+      show_icon: false
+      show_state: false
+      tap_action:
+        action: navigate
+        navigation_path: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          return dev ? '/config/devices/device/' + dev : '#';
+          ]]]
+      custom_fields:
+        left: |
+          [[[
+          return '<span style="font-size:1.3em;font-weight:bold;">Stack Detail</span>';
+          ]]]
+        right: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const label = selOk ? (S[sel].attributes.stack + ' (' + S[sel].attributes.site + ')') : 'No stack selected';
+          return '<span style="font-size:1.1em;text-decoration:underline;color:var(--primary-color,#03a9f4);">' + label + '</span>';
+          ]]]
+      styles:
+        grid:
+        - grid-template-areas: '"left right"'
+        - grid-template-columns: 1fr auto
+        card:
+        - padding: 10px
+        - cursor: pointer
+        custom_fields:
+          left:
+          - justify-self: start
+          right:
+          - justify-self: end
+    - type: horizontal-stack
+      cards:
+      - type: custom:button-card
+        triggers_update: all
+        name: Check for Update
+        show_icon: true
+        icon: mdi:cloud-search-outline
+        tooltip: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          if (!selOk) return 'No stack selected';
+          return usable(stackEnt('stack_check_button')) ? 'Check this stack for available container updates (registry digest check only, no docker command is run)' : '';
+          ]]]
+        tap_action: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const id = stackEnt('stack_check_button');
+          if (!usable(id)) return { action: 'none' };
+          return { action: 'call-service', service: 'button.press', target: { entity_id: id } };
+          ]]]
+        styles:
+          card:
+          - padding: 10px
+          - opacity: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const id = stackEnt('stack_check_button');
+              return usable(id) ? '1' : '0.35';
+              ]]]
+          - pointer-events: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const id = stackEnt('stack_check_button');
+              return usable(id) ? 'auto' : 'none';
+              ]]]
+          name:
+          - font-size: 12px
+      - type: custom:button-card
+        triggers_update: all
+        name: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const s = S[stackEnt('stack_switch')];
+          return (s && s.state === 'on') ? 'Stop Stack' : 'Start Stack';
+          ]]]
+        show_icon: true
+        show_state: false
+        icon: mdi:power
+        tooltip: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          if (!selOk) return 'No stack selected';
+          const s = S[stackEnt('stack_switch')];
+          if (!s || s.state === 'unavailable') return '';
+          return s.state === 'on' ? 'Stop this stack (docker compose stop)' : 'Start this stack (docker compose start)';
+          ]]]
+        tap_action: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const id = stackEnt('stack_switch');
+          if (!usable(id)) return { action: 'none' };
+          const running = S[id].state === 'on';
+          return {
+            action: 'call-service', service: 'switch.toggle', target: { entity_id: id },
+            confirmation: { text: (running ? 'Stop ' : 'Start ') + S[sel].attributes.stack + '?' }
+          };
+          ]]]
+        styles:
+          card:
+          - padding: 10px
+          - opacity: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const id = stackEnt('stack_switch');
+              return usable(id) ? '1' : '0.35';
+              ]]]
+          - pointer-events: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const id = stackEnt('stack_switch');
+              return usable(id) ? 'auto' : 'none';
+              ]]]
+          name:
+          - font-size: 12px
+          icon:
+          - color: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const s = S[stackEnt('stack_switch')];
+              return (s && s.state === 'on') ? 'var(--success-color, green)' : 'var(--disabled-text-color, grey)';
+              ]]]
+      - type: custom:button-card
+        triggers_update: all
+        name: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const u = S[stackEnt('stack_update_available')];
+          const updateAvailable = !!(u && u.state === 'on');
+          return updateAvailable ? 'Update Stack' : 'Restart Stack';
+          ]]]
+        show_icon: true
+        icon: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const u = S[stackEnt('stack_update_available')];
+          const updateAvailable = !!(u && u.state === 'on');
+          return updateAvailable ? 'mdi:cloud-download-outline' : 'mdi:restart';
+          ]]]
+        tooltip: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const u = S[stackEnt('stack_update_available')];
+          const updateAvailable = !!(u && u.state === 'on');
+          if (!selOk) return 'No stack selected';
+          if (!usable(stackEnt('stack_pull_button'))) return '';
+          return updateAvailable
+            ? 'Pull the available update and recreate this stack (docker compose pull && docker compose up -d)'
+            : 'Re-run pull & recreate on this stack. Same command as when an update is available; just nothing new to fetch (docker compose pull && docker compose up -d)';
+          ]]]
+        tap_action: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const u = S[stackEnt('stack_update_available')];
+          const updateAvailable = !!(u && u.state === 'on');
+          const id = stackEnt('stack_pull_button');
+          if (!usable(id)) return { action: 'none' };
+          return {
+            action: 'call-service', service: 'button.press', target: { entity_id: id },
+            confirmation: { text: (updateAvailable ? 'Update ' : 'Restart ') + S[sel].attributes.stack + '?' }
+          };
+          ]]]
+        styles:
+          card:
+          - padding: 10px
+          - opacity: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const id = stackEnt('stack_pull_button');
+              return usable(id) ? '1' : '0.35';
+              ]]]
+          - pointer-events: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const id = stackEnt('stack_pull_button');
+              return usable(id) ? 'auto' : 'none';
+              ]]]
+          name:
+          - font-size: 12px
+          icon:
+          - color: |
+              [[[
+              const S = states;
+              const G = (window.__dcm = window.__dcm || {});
+              if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+              if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+              if (!G.byDev) {
+                G.byDev = {};
+                for (const e of Object.values(hass.entities)) {
+                  if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+                }
+              }
+              if (!G.kids) {
+                G.kids = {};
+                for (const [id, d] of Object.entries(hass.devices)) {
+                  if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+                }
+              }
+              const kindOf = (d, k) => {
+                for (const id of (G.byDev[d] || [])) {
+                  if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+                }
+                return null;
+              };
+              const sel = S['input_text.selected_stack']?.state;
+              const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+              const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+              const stackEnt = (k) => kindOf(dev, k);
+              const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+              const u = S[stackEnt('stack_update_available')];
+              const updateAvailable = !!(u && u.state === 'on');
+              return updateAvailable ? 'orange' : 'var(--primary-text-color)';
+              ]]]
+    - type: custom:button-card
+      show_name: false
+      show_icon: false
+      show_state: false
+      tap_action:
+        action: none
+      hold_action:
+        action: none
+      double_tap_action:
+        action: none
+      triggers_update: all
+      custom_fields:
+        content: |
+          [[[
+          const S = states;
+          const G = (window.__dcm = window.__dcm || {});
+          if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+          if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+          if (!G.byDev) {
+            G.byDev = {};
+            for (const e of Object.values(hass.entities)) {
+              if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+            }
+          }
+          if (!G.kids) {
+            G.kids = {};
+            for (const [id, d] of Object.entries(hass.devices)) {
+              if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+            }
+          }
+          const kindOf = (d, k) => {
+            for (const id of (G.byDev[d] || [])) {
+              if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+            }
+            return null;
+          };
+          const sel = S['input_text.selected_stack']?.state;
+          const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+          const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+          const stackEnt = (k) => kindOf(dev, k);
+          const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+          const composeOrder = () => {
+            const cid = stackEnt('stack_compose_config');
+            const raw = cid && S[cid] && S[cid].attributes && S[cid].attributes.compose_config;
+            if (!raw) return [];
+            if (G.ordRaw === raw) return G.ordList;
+            const names = [];
+            let inS = false, indent = null;
+            for (const line of raw.split('\n')) {
+              const t = line.trim();
+              const lead = line.length - line.trimStart().length;
+              if (t === 'services:') { inS = true; continue; }
+              if (!inS) continue;
+              if (indent === null && t && lead > 0) indent = lead;
+              if (indent !== null) {
+                if (t && lead === indent && t.endsWith(':')) names.push(t.slice(0, -1));
+                else if (t && lead === 0 && !t.startsWith('#')) inS = false;
+              }
+            }
+            G.ordRaw = raw; G.ordList = names;
+            return names;
+          };
+          const services = () => {
+            const ord = composeOrder();
+            const rank = (n) => { const i = ord.indexOf(n); return i < 0 ? 1e9 : i; };
+            return (G.kids[dev] || [])
+              .map((id) => {
+                const st = kindOf(id, 'service_state');
+                return { dev: id, state: st ? S[st] : null, name: st ? (S[st].attributes.service || '') : '' };
+              })
+              .filter((x) => x.state)
+              .sort((x, y) => rank(x.name) - rank(y.name) || x.name.localeCompare(y.name));
+          };
+          const relWords = (iso) => {
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return null;
+            const n = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+            const u = (v, w) => v + ' ' + w + (v === 1 ? '' : 's');
+            if (n < 60) return u(n, 'second');
+            const m = Math.floor(n / 60); if (m < 60) return u(m, 'minute');
+            const h = Math.floor(m / 60); if (h < 24) return u(h, 'hour');
+            const dd = Math.floor(h / 24); if (dd < 30) return u(dd, 'day');
+            if (dd < 365) return u(Math.floor(dd / 30), 'month');
+            return u(Math.floor(dd / 365), 'year');
+          };
+          const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+          const NAV_VER = 4;
+          if (!window.__dcmNavState || window.__dcmNavState.v !== NAV_VER) {
+            // Versioned, so a changed dashboard replaces the old handlers instead of being blocked by them.
+            const prev = window.__dcmNavState;
+            if (prev) {
+              window.removeEventListener('click', prev.click, true);
+              window.removeEventListener('touchend', prev.touch, prev.touchOpts);
+              if (prev.tstart) window.removeEventListener('touchstart', prev.tstart, prev.tstartOpts);
+              if (prev.ctx) window.removeEventListener('contextmenu', prev.ctx, true);
+            }
+            // HA's card action-handler cancels the default action of every click that reaches a card, so
+            // anything clickable inside a button-card's HTML is handled here, in the capture phase.
+            const haEl = () => document.querySelector('home-assistant');
+            const callSvc = (domain, service, data) => { const h = haEl(); if (h && h.hass) h.hass.callService(domain, service, data); };
+            const moreInfo = (node, entityId) => node.dispatchEvent(new CustomEvent('hass-more-info', { detail: { entityId: entityId }, bubbles: true, composed: true }));
+            const hideTip = () => { const t = document.getElementById('dcm-tip'); if (t) t.remove(); };
+            const toggleTip = (node) => {
+              const text = node.dataset.dcmTip;
+              const r = node.getBoundingClientRect();
+              const key = text + '|' + Math.round(r.top) + '|' + Math.round(r.left);
+              const old = document.getElementById('dcm-tip');
+              if (old) { const same = old.dataset.key === key; old.remove(); if (same) return; }
+              const el = document.createElement('div');
+              el.id = 'dcm-tip';
+              el.dataset.key = key;
+              el.textContent = text;
+              el.style.cssText = 'position:fixed;z-index:99999;max-width:260px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.4;background:var(--card-background-color,#202020);color:var(--primary-text-color,#fff);border:1px solid var(--divider-color,#555);box-shadow:0 2px 8px rgba(0,0,0,0.4);';
+              document.body.appendChild(el);
+              const w = el.offsetWidth, h = el.offsetHeight;
+              el.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+              el.style.top = ((r.bottom + 6 + h > window.innerHeight) ? Math.max(8, r.top - h - 6) : r.bottom + 6) + 'px';
+            };
+            const go = (path) => {
+              if (window.location.pathname === path) return;
+              const ha = haEl();
+              const before = ha && ha.hass ? ha.hass.panelUrl : null;
+              window.history.pushState(null, '', path);
+              window.dispatchEvent(new CustomEvent('location-changed', { detail: { replace: false }, bubbles: true, composed: true }));
+              // if HA's router didn't pick the change up, fall back to a normal page load
+              setTimeout(() => {
+                const now = ha && ha.hass ? ha.hass.panelUrl : null;
+                if (!ha || now === before) window.location.assign(path);
+              }, 600);
+            };
+            const KEYS = ['dcmTip', 'dcmPath', 'dcmSelect', 'dcmMore', 'dcmReload'];
+            const scan = (ev) => {
+              for (const n of (ev.composedPath ? ev.composedPath() : [])) {
+                if (n && n.dataset) { for (const k of KEYS) { if (n.dataset[k]) return { key: k, node: n }; } }
+              }
+              return null;
+            };
+            const act = (hit, ev) => {
+              const n = hit.node, v = n.dataset[hit.key];
+              const modified = ev.ctrlKey || ev.metaKey || ev.shiftKey;
+              if (hit.key === 'dcmTip') toggleTip(n);
+              else if (hit.key === 'dcmPath') { if (modified) window.open(v, '_blank'); else go(v); }
+              else if (hit.key === 'dcmSelect') {
+                if (modified) moreInfo(n, v);
+                else callSvc('input_text', 'set_value', { entity_id: 'input_text.selected_stack', value: v });
+              }
+              else if (hit.key === 'dcmMore') moreInfo(n, v);
+              else if (hit.key === 'dcmReload') {
+                if (window.confirm(n.dataset.dcmConfirm || 'Reload?')) callSvc('homeassistant', 'reload_config_entry', { entity_id: v });
+              }
+            };
+            let ts = null;
+            const onStart = (ev) => { const t = ev.touches && ev.touches[0]; ts = t ? { x: t.clientX, y: t.clientY, at: Date.now() } : null; };
+            const onClick = (ev) => {
+              const hit = scan(ev);
+              if (!hit) { hideTip(); return; }
+              ev.stopPropagation();
+              ev.preventDefault();
+              if (hit.key !== 'dcmTip') hideTip();
+              act(hit, ev);
+            };
+            const onTouch = (ev) => {
+              const hit = scan(ev);
+              if (!hit) return;
+              const t = ev.changedTouches && ev.changedTouches[0];
+              if (ts && t && (Math.abs(t.clientX - ts.x) > 10 || Math.abs(t.clientY - ts.y) > 10)) return; // a scroll, not a tap
+              if (ts && Date.now() - ts.at > 500) return; // a long press: the context menu takes it
+              ev.stopPropagation();
+              ev.preventDefault();
+              if (hit.key !== 'dcmTip') hideTip();
+              act(hit, ev);
+            };
+            const onCtx = (ev) => {
+              const hit = scan(ev);
+              if (!hit || hit.key !== 'dcmSelect') return;
+              ev.stopPropagation();
+              ev.preventDefault();
+              moreInfo(hit.node, hit.node.dataset.dcmSelect);
+            };
+            const touchOpts = { capture: true, passive: false };
+            const tstartOpts = { capture: true, passive: true };
+            window.addEventListener('click', onClick, true);
+            window.addEventListener('touchend', onTouch, touchOpts);
+            window.addEventListener('touchstart', onStart, tstartOpts);
+            window.addEventListener('contextmenu', onCtx, true);
+            window.__dcmNavState = { v: NAV_VER, click: onClick, touch: onTouch, touchOpts: touchOpts, tstart: onStart, tstartOpts: tstartOpts, ctx: onCtx };
+          }
+          const bad = (x) => !x || ['unknown', 'unavailable', ''].includes(x.state);
+          const ent = (d, k) => { const id = kindOf(d, k); return id ? S[id] : null; };
+          const clean = (x) => bad(x) ? 'n/a' : esc(x.state);
+          const withUnit = (x) => { const c = clean(x); const u = x && x.attributes && x.attributes.unit_of_measurement; return (c === 'n/a' || !u) ? c : c + ' ' + esc(u); };
+          const info = (t) => '<span title="' + esc(t) + '" data-dcm-tip="' + esc(t) + '" style="cursor:pointer;margin-left:4px;display:inline-block;vertical-align:middle;"><ha-icon icon="mdi:information-outline" style="--mdc-icon-size:14px;color:var(--secondary-text-color);"></ha-icon></span>';
+          const chip = (title, icon, text) => '<span title="' + esc(title) + '" data-dcm-tip="' + esc(title) + '" style="cursor:pointer;display:inline-flex;align-items:center;gap:3px;padding:3px 6px;border-radius:10px;background:rgba(127,127,127,0.12);white-space:nowrap;"><ha-icon icon="' + icon + '" style="--mdc-icon-size:13px;color:var(--secondary-text-color);"></ha-icon><code>' + text + '</code></span>';
+          if (!selOk) return '<em>Tap a stack above to see its details here.</em>';
+          const svcs = services();
+          if (!svcs.length) return '<em>No containers found for this stack.</em>';
+          let out = '<div style="text-align:left;"><h3 style="margin:0 0 12px 0;font-weight:500;">Containers in this stack</h3>';
+          for (const svc of svcs) {
+            const running = svc.state.state === 'running';
+            const cpu = ent(svc.dev, 'service_cpu');
+            const mem = ent(svc.dev, 'service_memory');
+            const up = ent(svc.dev, 'service_uptime');
+            const det = ent(svc.dev, 'service_detected_version');
+            const pt = ent(svc.dev, 'service_pull_target_version');
+            const gh = ent(svc.dev, 'service_latest_github_release');
+            const rg = ent(svc.dev, 'service_latest_registry_tag');
+            const ua = ent(svc.dev, 'service_update_available');
+            let uptime = 'n/a';
+            if (!running) uptime = 'Stopped';
+            else if (up && !bad(up)) uptime = relWords(up.state) || esc(up.state);
+            const ghUrl = gh && gh.attributes && gh.attributes.release_url;
+            const ghLabel = ghUrl ? '<a href="' + esc(ghUrl) + '" target="_blank" rel="noopener">Github release</a>' : 'Github release';
+            const color = running ? '#4caf50' : '#9e9e9e';
+            const path = '/config/devices/device/' + svc.dev;
+            const line = 'border-bottom:1px solid var(--divider-color,#333);';
+            const row = (label, tip, x, last) => '<tr style="' + (last ? '' : line) + '"><td style="padding:4px 24px 4px 0;white-space:nowrap;width:200px;"><strong>' + label + '</strong> ' + info(tip) + '</td><td style="padding:4px 0;"><code>' + clean(x) + '</code></td></tr>';
+            out += '<div style="background:var(--card-background-color,#202020);border:1px solid var(--divider-color,#333);border-radius:12px;padding:12px 16px;margin-bottom:12px;">'
+              + '<div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px 16px;padding-bottom:10px;margin-bottom:6px;border-bottom:1px solid var(--divider-color,#333);">'
+              + '<div><a href="' + path + '" data-dcm-path="' + path + '" style="color:' + color + ';text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:1.5em;font-weight:bold;">' + esc(svc.name) + '</a>'
+              + ((ua && ua.state === 'on') ? '&nbsp;&nbsp;<span style="color:orange;font-weight:bold;">Update Available</span>' : '') + '</div>'
+              + '<div style="display:flex;align-items:center;gap:5px;font-size:11px;">'
+              + chip('Current CPU usage reported for this container', 'mdi:cpu-64-bit', withUnit(cpu))
+              + chip('Current memory usage reported for this container', 'mdi:memory', withUnit(mem))
+              + chip('How long this container has been running', 'mdi:clock-outline', uptime)
+              + '</div></div>'
+              + '<table style="width:100%;border-collapse:collapse;text-align:left;line-height:1.5;"><tbody>'
+              + row('Current version', 'The version currently running, detected from the image tag or label', det)
+              + row('Pull target', 'The version you would get if you pulled updates right now', pt)
+              + row(ghLabel, "The latest release published on the project's GitHub repo", gh)
+              + row('Registry tag', 'The newest real version tag found on the image registry', rg, true)
+              + '</tbody></table></div>';
+          }
+          return out + '</div>';
+          ]]]
+      styles:
+        grid:
+        - grid-template-areas: '"content"'
+        - grid-template-columns: 1fr
+        card:
+        - padding: 12px
+        - text-align: left
+        - cursor: default
+        custom_fields:
+          content:
+          - display: block
+          - justify-self: stretch
+          - width: 100%
+          - min-width: '0'
+          - text-align: left
+          - pointer-events: auto
+          - user-select: text
+      grid_options:
+        columns: 12
+  - type: custom:button-card
+    show_name: false
+    show_icon: false
+    show_state: false
+    tap_action:
+      action: none
+    hold_action:
+      action: none
+    double_tap_action:
+      action: none
+    triggers_update:
+    - input_text.selected_stack
+    custom_fields:
+      content: |
+        [[[
+        const S = states;
+        const G = (window.__dcm = window.__dcm || {});
+        if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+        if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+        if (!G.byDev) {
+          G.byDev = {};
+          for (const e of Object.values(hass.entities)) {
+            if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+          }
+        }
+        if (!G.kids) {
+          G.kids = {};
+          for (const [id, d] of Object.entries(hass.devices)) {
+            if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+          }
+        }
+        const kindOf = (d, k) => {
+          for (const id of (G.byDev[d] || [])) {
+            if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+          }
+          return null;
+        };
+        const sel = S['input_text.selected_stack']?.state;
+        const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+        const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+        const stackEnt = (k) => kindOf(dev, k);
+        const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+        if (!selOk) return '<em>Select a stack to see its compose config.</em>';
+        const s = S[stackEnt('stack_compose_config')];
+        const raw = s && s.attributes && s.attributes.compose_config;
+        if (!raw) return '<em>No compose config available for this stack (entity may be disabled, or has not been polled yet).</em>';
+        const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<div style="font-size:1.1em;font-weight:bold;margin-bottom:6px;">Compose Config</div>'
+          + '<pre style="background:#1e1e1e;color:#d4d4d4;padding:10px;border-radius:6px;overflow:auto;max-height:600px;font-size:12px;line-height:1.35;margin:0;user-select:text;text-align:left;">' + esc(raw) + '</pre>';
+        ]]]
+    styles:
+      grid:
+      - grid-template-areas: '"content"'
+      - grid-template-columns: 1fr
+      card:
+      - padding: 12px
+      - text-align: left
+      - cursor: default
+      custom_fields:
+        content:
+        - display: block
+        - justify-self: stretch
+        - width: 100%
+        - min-width: '0'
+        - text-align: left
+        - pointer-events: auto
+        - user-select: text
+    grid_options:
+      columns: 12
+- type: grid
+  cards:
+  - type: heading
+    heading: Docker Logs
+    heading_style: title
+  - type: horizontal-stack
+    cards:
+    - type: custom:button-card
+      name: Fetch Logs
+      icon: mdi:download
+      show_icon: true
+      show_state: false
+      triggers_update:
+      - input_text.selected_stack
+      - input_number.container_log_index
+      tap_action: |
+        [[[
+        const S = states;
+        const G = (window.__dcm = window.__dcm || {});
+        if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+        if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+        if (!G.byDev) {
+          G.byDev = {};
+          for (const e of Object.values(hass.entities)) {
+            if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+          }
+        }
+        if (!G.kids) {
+          G.kids = {};
+          for (const [id, d] of Object.entries(hass.devices)) {
+            if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+          }
+        }
+        const kindOf = (d, k) => {
+          for (const id of (G.byDev[d] || [])) {
+            if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+          }
+          return null;
+        };
+        const sel = S['input_text.selected_stack']?.state;
+        const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+        const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+        const stackEnt = (k) => kindOf(dev, k);
+        const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+        const composeOrder = () => {
+          const cid = stackEnt('stack_compose_config');
+          const raw = cid && S[cid] && S[cid].attributes && S[cid].attributes.compose_config;
+          if (!raw) return [];
+          if (G.ordRaw === raw) return G.ordList;
+          const names = [];
+          let inS = false, indent = null;
+          for (const line of raw.split('\n')) {
+            const t = line.trim();
+            const lead = line.length - line.trimStart().length;
+            if (t === 'services:') { inS = true; continue; }
+            if (!inS) continue;
+            if (indent === null && t && lead > 0) indent = lead;
+            if (indent !== null) {
+              if (t && lead === indent && t.endsWith(':')) names.push(t.slice(0, -1));
+              else if (t && lead === 0 && !t.startsWith('#')) inS = false;
+            }
+          }
+          G.ordRaw = raw; G.ordList = names;
+          return names;
+        };
+        const services = () => {
+          const ord = composeOrder();
+          const rank = (n) => { const i = ord.indexOf(n); return i < 0 ? 1e9 : i; };
+          return (G.kids[dev] || [])
+            .map((id) => {
+              const st = kindOf(id, 'service_state');
+              return { dev: id, state: st ? S[st] : null, name: st ? (S[st].attributes.service || '') : '' };
+            })
+            .filter((x) => x.state)
+            .sort((x, y) => rank(x.name) - rank(y.name) || x.name.localeCompare(y.name));
+        };
+        const rawIdx = Number(states['input_number.container_log_index']?.state || 0);
+        const svcs = services();
+        const idx = svcs.length ? ((rawIdx % svcs.length) + svcs.length) % svcs.length : 0;
+        const cur = svcs[idx];
+        if (!cur) return { action: 'none' };
+        const id = kindOf(cur.dev, 'service_fetch_logs_button');
+        if (!usable(id)) return { action: 'none' };
+        return { action: 'call-service', service: 'button.press', target: { entity_id: id } };
+        ]]]
+      styles:
+        card:
+        - padding: 8px
+        name:
+        - font-size: 12px
+        icon:
+        - width: 22px
+    - type: custom:button-card
+      name: Next Log
+      icon: mdi:skip-next
+      show_icon: true
+      show_state: false
+      tap_action: |
+        [[[
+        const S = states;
+        const G = (window.__dcm = window.__dcm || {});
+        if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+        if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+        if (!G.byDev) {
+          G.byDev = {};
+          for (const e of Object.values(hass.entities)) {
+            if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+          }
+        }
+        if (!G.kids) {
+          G.kids = {};
+          for (const [id, d] of Object.entries(hass.devices)) {
+            if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+          }
+        }
+        const kindOf = (d, k) => {
+          for (const id of (G.byDev[d] || [])) {
+            if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+          }
+          return null;
+        };
+        const sel = S['input_text.selected_stack']?.state;
+        const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+        const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+        const stackEnt = (k) => kindOf(dev, k);
+        const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+        const composeOrder = () => {
+          const cid = stackEnt('stack_compose_config');
+          const raw = cid && S[cid] && S[cid].attributes && S[cid].attributes.compose_config;
+          if (!raw) return [];
+          if (G.ordRaw === raw) return G.ordList;
+          const names = [];
+          let inS = false, indent = null;
+          for (const line of raw.split('\n')) {
+            const t = line.trim();
+            const lead = line.length - line.trimStart().length;
+            if (t === 'services:') { inS = true; continue; }
+            if (!inS) continue;
+            if (indent === null && t && lead > 0) indent = lead;
+            if (indent !== null) {
+              if (t && lead === indent && t.endsWith(':')) names.push(t.slice(0, -1));
+              else if (t && lead === 0 && !t.startsWith('#')) inS = false;
+            }
+          }
+          G.ordRaw = raw; G.ordList = names;
+          return names;
+        };
+        const services = () => {
+          const ord = composeOrder();
+          const rank = (n) => { const i = ord.indexOf(n); return i < 0 ? 1e9 : i; };
+          return (G.kids[dev] || [])
+            .map((id) => {
+              const st = kindOf(id, 'service_state');
+              return { dev: id, state: st ? S[st] : null, name: st ? (S[st].attributes.service || '') : '' };
+            })
+            .filter((x) => x.state)
+            .sort((x, y) => rank(x.name) - rank(y.name) || x.name.localeCompare(y.name));
+        };
+        const rawIdx = Number(states['input_number.container_log_index']?.state || 0);
+        const svcs = services();
+        const idx = svcs.length ? ((rawIdx % svcs.length) + svcs.length) % svcs.length : 0;
+        const cur = svcs[idx];
+        if (!svcs.length) return { action: 'none' };
+        return {
+          action: 'call-service', service: 'input_number.set_value',
+          service_data: { entity_id: 'input_number.container_log_index', value: (idx + 1) % svcs.length }
+        };
+        ]]]
+      styles:
+        card:
+        - padding: 8px
+        name:
+        - font-size: 12px
+        icon:
+        - width: 22px
+    grid_options:
+      columns: full
+  - type: custom:button-card
+    show_name: false
+    show_icon: false
+    show_state: false
+    tap_action:
+      action: none
+    hold_action:
+      action: none
+    double_tap_action:
+      action: none
+    triggers_update: all
+    custom_fields:
+      content: |
+        [[[
+        const S = states;
+        const G = (window.__dcm = window.__dcm || {});
+        if (G.E !== hass.entities) { G.E = hass.entities; G.byDev = null; }
+        if (G.D !== hass.devices) { G.D = hass.devices; G.kids = null; }
+        if (!G.byDev) {
+          G.byDev = {};
+          for (const e of Object.values(hass.entities)) {
+            if (e.device_id) (G.byDev[e.device_id] = G.byDev[e.device_id] || []).push(e.entity_id);
+          }
+        }
+        if (!G.kids) {
+          G.kids = {};
+          for (const [id, d] of Object.entries(hass.devices)) {
+            if (d.via_device_id) (G.kids[d.via_device_id] = G.kids[d.via_device_id] || []).push(id);
+          }
+        }
+        const kindOf = (d, k) => {
+          for (const id of (G.byDev[d] || [])) {
+            if (S[id] && S[id].attributes && S[id].attributes.kind === k) return id;
+          }
+          return null;
+        };
+        const sel = S['input_text.selected_stack']?.state;
+        const selOk = !!(sel && S[sel] && S[sel].attributes && S[sel].attributes.kind === 'stack_state');
+        const dev = selOk ? (hass.entities[sel] && hass.entities[sel].device_id) : null;
+        const stackEnt = (k) => kindOf(dev, k);
+        const usable = (id) => !!(id && S[id] && S[id].state !== 'unavailable');
+        const composeOrder = () => {
+          const cid = stackEnt('stack_compose_config');
+          const raw = cid && S[cid] && S[cid].attributes && S[cid].attributes.compose_config;
+          if (!raw) return [];
+          if (G.ordRaw === raw) return G.ordList;
+          const names = [];
+          let inS = false, indent = null;
+          for (const line of raw.split('\n')) {
+            const t = line.trim();
+            const lead = line.length - line.trimStart().length;
+            if (t === 'services:') { inS = true; continue; }
+            if (!inS) continue;
+            if (indent === null && t && lead > 0) indent = lead;
+            if (indent !== null) {
+              if (t && lead === indent && t.endsWith(':')) names.push(t.slice(0, -1));
+              else if (t && lead === 0 && !t.startsWith('#')) inS = false;
+            }
+          }
+          G.ordRaw = raw; G.ordList = names;
+          return names;
+        };
+        const services = () => {
+          const ord = composeOrder();
+          const rank = (n) => { const i = ord.indexOf(n); return i < 0 ? 1e9 : i; };
+          return (G.kids[dev] || [])
+            .map((id) => {
+              const st = kindOf(id, 'service_state');
+              return { dev: id, state: st ? S[st] : null, name: st ? (S[st].attributes.service || '') : '' };
+            })
+            .filter((x) => x.state)
+            .sort((x, y) => rank(x.name) - rank(y.name) || x.name.localeCompare(y.name));
+        };
+        const rel = (iso) => {
+          const d = new Date(iso);
+          if (isNaN(d.getTime())) return null;
+          const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+          if (s < 60) return s + 's';
+          if (s < 3600) return Math.floor(s / 60) + 'm';
+          if (s < 86400) return Math.floor(s / 3600) + 'h';
+          return Math.floor(s / 86400) + 'd';
+        };
+        const rawIdx = Number(states['input_number.container_log_index']?.state || 0);
+        const svcs = services();
+        const idx = svcs.length ? ((rawIdx % svcs.length) + svcs.length) % svcs.length : 0;
+        const cur = svcs[idx];
+        const ansiColors = {30:'#000000',31:'#e06c75',32:'#98c379',33:'#e5c07b',34:'#61afef',35:'#c678dd',36:'#56b6c2',37:'#d4d4d4',90:'#5c6370',91:'#f07178',92:'#c3e88d',93:'#ffcb6b',94:'#82aaff',95:'#c792ea',96:'#89ddff',97:'#ffffff'};
+        function ansiToHtml(text) {
+          const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          let result = '', lastIndex = 0, openSpan = false, match;
+          const ansiRegex = /\x1B\[([0-9;]*)m/g;
+          while ((match = ansiRegex.exec(escaped)) !== null) {
+            result += escaped.slice(lastIndex, match.index);
+            lastIndex = ansiRegex.lastIndex;
+            if (openSpan) { result += '</span>'; openSpan = false; }
+            const codes = match[1] === '' ? [0] : match[1].split(';').map(Number);
+            const parts = [];
+            for (const code of codes) {
+              if (code === 0 || code === 39 || code === 49) continue;
+              if (code === 1) parts.push('font-weight:bold');
+              if (code === 2) parts.push('opacity:0.7');
+              if (ansiColors[code]) parts.push('color:' + ansiColors[code]);
+            }
+            if (parts.length) { result += '<span style="' + parts.join(';') + '">'; openSpan = true; }
+          }
+          result += escaped.slice(lastIndex);
+          if (openSpan) result += '</span>';
+          return result.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '');
+        }
+        return (function() {
+          if (!selOk) return '<em>Select a stack to view its logs.</em>';
+          if (!cur) return '<em>No containers found for this stack.</em>';
+          const logId = kindOf(cur.dev, 'service_last_fetched_logs');
+          const logState = logId ? S[logId] : null;
+          const key = [sel, idx, logId, logState && logState.state, Math.floor(Date.now() / 30000)].join('|');
+          if (G.logKey === key && G.logOut) return G.logOut;
+          const rawLog = logState && logState.attributes ? logState.attributes.log_text : null;
+          let updated = 'unknown';
+          if (logState && logState.state && logState.state !== 'unknown' && logState.state !== 'unavailable') {
+            const r = rel(logState.state);
+            if (r) updated = r + ' ago';
+          }
+          const title = String(cur.name).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+          let out = '<div style="font-size:24px;font-weight:bold;margin:0 0 6px 0;user-select:text;">' + title + '</div>'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;font-size:13px;">'
+            + '<strong>Container ' + (idx + 1) + ' of ' + svcs.length + '</strong>'
+            + '<em style="color:var(--secondary-text-color);white-space:nowrap;">Updated ' + updated + '</em></div>';
+          if (!rawLog) {
+            out += '<em style="font-size:0.9em;color:var(--secondary-text-color);">No logs available for ' + title + '.</em>';
+          } else {
+            out += '<pre id="docker-log-scroll" style="display:block;box-sizing:border-box;width:100%;max-width:100%;height:700px;max-height:700px;background:#1e1e1e;padding:10px;border-radius:6px;overflow:auto;overscroll-behavior:contain;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch;user-select:text;cursor:text;font-family:monospace;font-size:12px;line-height:1.35;white-space:pre;text-align:left;margin:0;">' + ansiToHtml(rawLog) + '</pre>';
+          }
+          setTimeout(() => {
+            const lv = this.shadowRoot && this.shadowRoot.querySelector('#docker-log-scroll');
+            if (lv) lv.scrollTop = lv.scrollHeight;
+          }, 150);
+          G.logKey = key; G.logOut = out;
+          return out;
+        }).call(this);
+        ]]]
+    styles:
+      grid:
+      - grid-template-areas: '"content"'
+      - grid-template-columns: 1fr
+      card:
+      - padding: 12px
+      - text-align: left
+      - cursor: default
+      - user-select: text
+      custom_fields:
+        content:
+        - display: block
+        - justify-self: stretch
+        - width: 100%
+        - min-width: '0'
+        - text-align: left
+        - pointer-events: auto
+        - user-select: text
+    grid_options:
+      columns: full
+  column_span: 2
+cards: []

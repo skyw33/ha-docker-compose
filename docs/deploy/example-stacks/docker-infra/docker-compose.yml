@@ -1,13 +1,19 @@
-# The self-referential infrastructure stack. docker-cli (the sidecar) is
-# what this integration Docker-execs into to run every `docker compose`
-# command it issues — including any command that would target its own
-# container or its network-sibling docker-socket-proxy. A stop or pull
-# issued by the very process being stopped/recreated is a real race
-# condition with no safe general fix, so both services are labeled
-# protection=full: the integration will not create a switch or
-# restart/pull button for either one. It still reports their live state,
-# stats, and update-availability normally — protection only restricts
-# actions, never visibility.
+# docker-infra: the stack that lets Home Assistant run `docker compose` on this host.
+#
+# docker-cli (the sidecar) is what this integration execs into to run every
+# `docker compose` command. It reaches Docker through docker-socket-proxy, which
+# only allows the API areas enabled below.
+#
+# Both services carry protection=full. The integration will not create a switch or
+# a restart/pull button for either one, but it still reports their state, stats and
+# update availability as normal. Recreating them from inside the sidecar is unsafe:
+# the compose process runs in docker-cli and talks to Docker through
+# docker-socket-proxy, so replacing either one cuts the update off partway through.
+#
+# To update THIS stack, run on the host (not from Home Assistant):
+#   docker compose pull && docker compose up -d
+#
+# See README.md ("Using docker-socket-proxy") for what each variable allows.
 services:
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy
@@ -17,17 +23,31 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
+      # Required by this integration
       - CONTAINERS=1
-      - EXEC=1
       - IMAGES=1
+      - EXEC=1
       - POST=1
-      # All other endpoint groups default to 0/disabled unless added here
-      # later. See ../../README.md before widening this list.
+      # Required by `docker compose` itself when a stack creates networks or volumes.
+      # Compose creates a default network for every project, so in practice: always.
+      - NETWORKS=1
+      - VOLUMES=1
+      # Optional: host CPU core count, used to report "Total Container CPU" as a
+      # percentage of the whole host. Without it the integration falls back to the
+      # core count in each container's stats.
+      - INFO=1
+      # All other endpoint groups stay disabled unless you add them here.
     ports:
+      # Home Assistant on THIS host (network_mode: host): loopback only.
       - "127.0.0.1:2375:2375"
-      # Bound to localhost only — do not expose this on the LAN or any
-      # external interface. The homeassistant stack reaches it via host
-      # loopback since it runs with network_mode: host.
+      # Home Assistant on ANOTHER host: bind to this machine's LAN address instead,
+      # for example "192.168.1.50:2375:2375", and restrict it to the Home Assistant
+      # host's address. Note that ufw does not filter Docker-published ports; use a
+      # rule in the DOCKER-USER iptables chain or your router/firewall.
+      #
+      # SECURITY: with CONTAINERS, EXEC and POST enabled, anything that can reach this
+      # port can run commands in your containers, which is effectively control of the
+      # host. Never expose it beyond a network you trust.
     restart: unless-stopped
     networks:
       - docker-proxy-net
@@ -40,12 +60,10 @@ services:
     environment:
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
     volumes:
-      # The whole stacks root, not just this folder — docker-cli execs
-      # `docker compose` commands for every stack the integration manages,
-      # not only this one. Left side and right side must be IDENTICAL to
-      # the real host path, and identical to this integration's "stacks
-      # root" config value — see ../../README.md for why. No docker.sock
-      # mount.
+      # The whole stacks root, not just this folder: docker-cli runs `docker compose`
+      # for every stack the integration manages. The left and right side must be
+      # IDENTICAL to the real host path, and identical to the "stacks root" you enter
+      # when adding the integration. No docker.sock mount.
       - /opt/stacks:/opt/stacks
     restart: unless-stopped
     command: ["sleep", "infinity"]

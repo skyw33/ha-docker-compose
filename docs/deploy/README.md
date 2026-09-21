@@ -104,6 +104,76 @@ not add path-remapping logic to work around this; fix the mount instead.
    its services are labeled `protection=full`, see above), `homeassistant`
    will have the full set.
 
+## Adding a second host (remote site)
+
+One config entry per Docker host (see the main README's "One Docker
+daemon per config entry" limitation) — repeat this for a NAS or any other
+machine you want managed as its own site, alongside the steps above.
+
+**On the remote host**: deploy `docker-infra` as in step 2 above, with
+two differences:
+
+- Publish the proxy port on that machine's own LAN address instead of
+  loopback (e.g. `"192.168.1.50:2375:2375"`, not `"127.0.0.1:2375:2375"`
+  — see the example's own `ports:` comments), and restrict it to the
+  Home Assistant host's address specifically, not the whole LAN. Note
+  that `ufw` does not filter Docker-published ports at all; use a rule
+  in the `DOCKER-USER` iptables chain, or your router/firewall, instead.
+- The stacks root must be reachable at the identical absolute path from
+  **Home Assistant's own filesystem too**, not only the sidecar's — this
+  integration reads compose files directly to discover stacks, before
+  the sidecar is ever involved (see `discovery.py`). On one host that's
+  automatic; across two, it means the stacks root needs to be shared
+  over the network (NFS/SMB or similar) and mounted at the same absolute
+  path on both machines. A folder that only exists locally on the remote
+  host won't be visible to HA's own discovery, regardless of what the
+  sidecar can see.
+
+**In Home Assistant**: Settings → Devices & Services → Add Integration →
+"Docker Compose Manager" again. The setup form's fields (exact labels):
+
+- **"Docker host address"**: `tcp://<remote-ip>:2375`
+- **"Stacks root folder"**: the identical path from above, as seen from
+  Home Assistant's own filesystem (which per the previous point must
+  match what the remote sidecar sees too)
+- **"Sidecar container name"**: the remote sidecar's container name —
+  reusing the same name as your first entry's sidecar is fine, since
+  each config entry talks to its own Docker host independently
+- **"Site name"**: a name for this host, e.g. `nas`. Optional — left
+  blank, one is derived from the stacks root folder's own name instead.
+
+The site name appears in two places: in that host's stack and service
+device names (e.g. `jellyfin (nas)`), and in the two per-site total
+sensors' names and entity IDs (`Total Container CPU nas` →
+`sensor.total_container_cpu_nas`). See the main README's "Using
+docker-socket-proxy" section for the full proxy-variable table and the
+security note — not repeated here.
+
+**Verify**:
+
+- `curl http://<remote-ip>:2375/version` succeeds from the Home Assistant
+  host, and fails to connect from any other machine.
+- The new entry's stacks show up (Settings → System → Logs has the same
+  discovery line as step 5 above, for this entry).
+- Settings → Devices & Services → this entry → **Reload** only re-scans
+  this entry's own compose files — the first host's stacks are
+  untouched.
+
+**If the second site doesn't come up**:
+
+- **Port unreachable from the HA host**: re-check the bind address and
+  firewall rule above; confirm with `curl` from the HA host itself
+  before touching HA's own config.
+- **Firewall looks right but still reachable from the LAN**: if you used
+  `ufw`, it doesn't see Docker-published ports — check `DOCKER-USER` or
+  your router instead.
+- **"No stacks found"**: almost always the stacks-root path existing on
+  one side (HA or the sidecar) but not the other, or at a different
+  absolute path — confirm both independently, not just one.
+- **`INFO` blocked on the remote proxy**: doesn't stop the entry from
+  coming up — the per-site CPU total sensor just falls back to
+  `online_cpus` (see the main README's `INFO=1` row).
+
 ## If something isn't reachable
 
 - **Compose actions fail, error names the sidecar container**: check its

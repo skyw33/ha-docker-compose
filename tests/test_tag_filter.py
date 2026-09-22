@@ -4,6 +4,8 @@ from ha_docker_compose.tag_filter import (
     filter_tags,
     is_not_behind,
     is_real_version_tag,
+    known_base_image_suffix,
+    prioritize_by_suffix,
     rank_final_versions,
     select_newest_version_tag,
 )
@@ -353,3 +355,104 @@ def test_rank_final_versions_mosquitto_real_world_tag_shape() -> None:
         "alpine",
     ]
     assert select_newest_version_tag(tags) == "2.1.2-alpine"
+
+
+def test_rank_final_versions_promotes_build_variant_suffixed_tag() -> None:
+    """The confirmed real case: docker:cli is digest-DIFFERENT from bare
+    docker:<version> (a genuine image split, not an alias) — "cli" must
+    be recognized the same way "alpine" is, or a service pinned to
+    "29.8.1-cli" can never even enter the ranked candidate list."""
+    for suffix in ("cli", "dind", "windowsservercore", "git", "rootless"):
+        tags = ["29.8.0", f"29.8.1-{suffix}", "29.8.0-cli"]
+        assert f"29.8.1-{suffix}" in rank_final_versions(tags)
+
+
+def test_known_base_image_suffix_recognizes_build_variant() -> None:
+    assert known_base_image_suffix("29.8.1-cli") == "cli"
+    assert known_base_image_suffix("2.1.2-alpine") == "alpine"
+
+
+def test_known_base_image_suffix_none_for_bare_tag() -> None:
+    assert known_base_image_suffix("29.8.1") is None
+
+
+def test_known_base_image_suffix_none_for_unrecognized_word() -> None:
+    assert known_base_image_suffix("2.2.0-nightly") is None
+
+
+def test_prioritize_by_suffix_noop_when_pinned_suffix_none() -> None:
+    ranked = ["29.8.1", "29.8.1-cli", "29.8.0"]
+    assert prioritize_by_suffix(ranked, None) == ranked
+
+
+def test_prioritize_by_suffix_same_suffix_candidate_beats_equal_ranked_bare_tag() -> None:
+    """The exact docker:cli mechanism: a service pinned to "29.8.1-cli"
+    needs its own suffix's candidates searched before same-ranked bare
+    tags or other variants, since only a same-suffix candidate can ever
+    share its digest."""
+    ranked = rank_final_versions(
+        ["29.8.1", "29.8.1-cli", "29.8.1-dind", "29.8.0", "29.8.0-cli"]
+    )
+    prioritized = prioritize_by_suffix(ranked, "cli")
+    assert prioritized[0] == "29.8.1-cli"
+    assert prioritized.index("29.8.1-cli") < prioritized.index("29.8.1")
+    assert prioritized.index("29.8.0-cli") < prioritized.index("29.8.1-dind")
+
+
+def test_prioritize_by_suffix_preserves_relative_order_within_each_group() -> None:
+    """A reorder (stable partition), not a re-sort — within the
+    same-suffix group and within the "other" group, newest-first order
+    from rank_final_versions() must survive untouched."""
+    ranked = rank_final_versions(
+        ["29.8.1", "29.8.1-cli", "29.8.0", "29.8.0-cli", "29.7.0", "29.7.0-cli"]
+    )
+    prioritized = prioritize_by_suffix(ranked, "cli")
+    assert prioritized == ["29.8.1-cli", "29.8.0-cli", "29.7.0-cli", "29.8.1", "29.8.0", "29.7.0"]
+
+
+def test_prioritize_by_suffix_finds_older_same_suffix_candidate_ahead_of_newer_other_suffix_ties() -> (
+    None
+):
+    """Reordering before bounding matters: a service several versions
+    behind on its own suffix must not have its match pushed out of a
+    bounded search window by ties of newer versions in other suffixes."""
+    ranked = rank_final_versions(
+        [
+            "29.8.1",
+            "29.8.1-cli",
+            "29.8.1-dind",
+            "29.8.0",
+            "29.8.0-cli",
+            "29.8.0-dind",
+            "29.5.0",
+            "29.5.0-cli",
+        ]
+    )
+    prioritized = prioritize_by_suffix(ranked, "cli")[:3]
+    assert prioritized == ["29.8.1-cli", "29.8.0-cli", "29.5.0-cli"]
+
+
+def test_rank_final_versions_docker_cli_real_world_tag_shape() -> None:
+    """End-to-end against the real, confirmed-live docker/docker tag
+    shape: bare tags and cli/dind/windowsservercore variants of the same
+    versions coexist, with the bare tag genuinely being the newest
+    release. latest_registry_tag stays variant-agnostic (still bare, per
+    REGISTRY_TAG_WALK_SPEC.md's build-variant-suffix amendment) while a
+    :cli-pinned service's prioritized search correctly surfaces its own
+    variant first."""
+    tags = [
+        "29.8.1",
+        "29.8.1-cli",
+        "29.8.1-dind",
+        "29.8.1-windowsservercore",
+        "29.8.0",
+        "29.8.0-cli",
+        "29.8.0-dind",
+        "29.8.0-windowsservercore",
+    ]
+    assert select_newest_version_tag(tags) == "29.8.1"
+
+    ranked = rank_final_versions(tags)
+    pinned_suffix = known_base_image_suffix("29.8.1-cli")
+    prioritized = prioritize_by_suffix(ranked, pinned_suffix)
+    assert prioritized[0] == "29.8.1-cli"

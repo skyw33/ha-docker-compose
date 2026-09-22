@@ -64,6 +64,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .const import STACK_STATE_RUNNING
 from .coordinator import StacksCoordinator, StackStatus
 from .image_ref import repo_name
+from .image_ref import tag as image_tag
 from .protection import parse_compose_labels
 from .registry_client import RegistryAuthError, RegistryClient, RegistryError, RegistryUnsupportedError
 from .tag_filter import (
@@ -71,6 +72,8 @@ from .tag_filter import (
     TAG_INCLUDE_LABEL,
     filter_tags,
     is_not_behind,
+    known_base_image_suffix,
+    prioritize_by_suffix,
     rank_final_versions,
     select_newest_version_tag,
 )
@@ -362,7 +365,24 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         # per search, since it's the same bounded candidate set either way
         # (see PULL_TARGET_MAX_DIGEST_LOOKUPS and rank_final_versions()'s
         # own tie-break for why this ordering is deterministic).
-        ranked = rank_final_versions(candidates)[:PULL_TARGET_MAX_DIGEST_LOOKUPS]
+        #
+        # Reordered (prioritize_by_suffix()) before bounding, not after,
+        # so that candidates sharing the *pinned* tag's own known
+        # base-image/build-variant suffix (e.g. "cli") are searched first
+        # — a same-ranked bare tag or different-suffix variant can never
+        # share this service's digest, so spending the bounded budget on
+        # them first (the previous behavior) could starve out a
+        # same-suffix candidate that's actually several versions behind.
+        # A no-op for the overwhelming majority of services, whose pinned
+        # tag carries no recognized suffix at all. Only affects these two
+        # digest-verified searches — never rank_final_versions() itself or
+        # latest_registry_tag, which stays variant-agnostic on purpose.
+        # See REGISTRY_TAG_WALK_SPEC.md's build-variant-suffix amendment
+        # for the real docker:cli case this fixes.
+        pinned_suffix = known_base_image_suffix(image_tag(image_ref))
+        ranked = prioritize_by_suffix(rank_final_versions(candidates), pinned_suffix)[
+            :PULL_TARGET_MAX_DIGEST_LOOKUPS
+        ]
 
         pull_target_version = None
         if pinned_digest:

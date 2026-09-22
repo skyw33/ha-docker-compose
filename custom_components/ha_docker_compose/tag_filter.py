@@ -153,9 +153,10 @@ def filter_tags(
     return candidates
 
 
-# Curated, deliberately narrow — Docker base-image/distro identifiers
-# only, the way they commonly appear as a tag's trailing `-<word>` (e.g.
-# "2.1.2-alpine"). NOT "any word packaging.version.Version doesn't
+# Curated, deliberately narrow — known Docker base-image/distro
+# identifiers AND known build-target/variant identifiers, the way they
+# commonly appear as a tag's trailing `-<word>` (e.g. "2.1.2-alpine",
+# "29.8.1-cli"). NOT "any word packaging.version.Version doesn't
 # recognize" (confirmed real case for why that would be unsafe: a tag
 # suffixed "-nightly" or "-snapshot" would also fail to parse directly,
 # and blindly stripping *any* unrecognized suffix would wrongly promote
@@ -167,13 +168,29 @@ def filter_tags(
 # recognized pre/post/dev-release keywords (alpha/a/beta/b/preview/pre/
 # c/rc/post/rev/r/dev) — direct test, not assumed.
 #
-# Real, confirmed case this exists for: eclipse-mosquitto publishes its
-# 2.1.x line *only* as "2.1.2-alpine" etc. — no bare "2.1.2" tag exists
-# at all (confirmed live against Docker Hub) — while its older 1.x/2.0.x
-# lines publish both a bare tag and a "-openssl" variant of the exact
-# same version. Scoped to Linux base images only (this integration's own
-# domain); Windows-container base tags (nanoserver, windowsservercore)
-# deliberately left out.
+# Real, confirmed case this set originally existed for: eclipse-mosquitto
+# publishes its 2.1.x line *only* as "2.1.2-alpine" etc. — no bare
+# "2.1.2" tag exists at all (confirmed live against Docker Hub) — while
+# its older 1.x/2.0.x lines publish both a bare tag and a "-openssl"
+# variant of the exact same version.
+#
+# cli/dind/windowsservercore/git/rootless (distinct from the base-image
+# words above — these are build-target/variant identifiers, not distro
+# names) were added for a second, related but different real case:
+# docker:cli, docker:dind, etc. are digest-DIFFERENT from bare
+# docker:<version> (a real, deliberate image split, not an alias) — a
+# service pinned to "29.8.1-cli" was never finding its own tag in the
+# ranked candidates at all, since "cli" wasn't recognized, so the bounded
+# digest search (tag_walk_coordinator.py) only ever saw bare-tagged
+# candidates that could never share its digest. Confirmed live against
+# Docker Hub's real docker/docker tag list: "25.0.5-git", "25.0.5-dind",
+# and bare "25.0.5" all share one digest (a genuine, stable, git-tool-
+# bundled variant, not an unstable/edge build) — "-git" here is safe by
+# the same reasoning as "-alpine", not the "-nightly" risk it might
+# suggest by name. windowsservercore is included here (unlike an earlier
+# version of this set, which deliberately excluded it) now that it's a
+# confirmed real build-variant suffix on the same image family, not just
+# a hypothetical.
 KNOWN_BASE_IMAGE_SUFFIXES = frozenset(
     {
         "alpine",
@@ -191,25 +208,30 @@ KNOWN_BASE_IMAGE_SUFFIXES = frozenset(
         "noble",
         "bionic",
         "xenial",
+        "cli",
+        "dind",
+        "windowsservercore",
+        "git",
+        "rootless",
     }
 )
 
 
-def _strip_known_base_image_suffix(tag: str) -> str | None:
-    """If `tag` doesn't parse directly but is `<version>-<suffix>` where
-    `suffix` (case-insensitive) is a known base-image/distro identifier
-    and `<version>` parses cleanly on its own, return `<version>`;
-    otherwise None. Only ever called as a fallback after a direct
-    Version(tag) has already failed — see rank_final_versions().
+def _split_known_suffix(tag: str) -> tuple[str, str] | None:
+    """If `tag` is `<version>-<suffix>` where `suffix` (case-insensitive)
+    is a known base-image/build-variant identifier and `<version>` parses
+    cleanly on its own, return `(<version>, <suffix lowercased>)`;
+    otherwise None. Shared by _strip_known_base_image_suffix() and
+    known_base_image_suffix() below, which just pick a different element
+    of the pair.
 
     Single trailing suffix only (rpartition on the last "-"): a tag like
     "3.12-slim-bookworm" (two stacked suffixes, a real, common pattern —
-    e.g. Python's own official images) won't match and stays excluded,
-    same as before this function existed. That's a coverage gap, not a
-    correctness risk — this module prefers under-matching over
-    over-matching throughout (see module docstring), and extending this
-    to strip multiple stacked suffixes wasn't needed for any confirmed
-    real case yet.
+    e.g. Python's own official images) won't match and stays excluded.
+    That's a coverage gap, not a correctness risk — this module prefers
+    under-matching over over-matching throughout (see module docstring),
+    and extending this to strip multiple stacked suffixes wasn't needed
+    for any confirmed real case yet.
     """
     prefix, sep, suffix = tag.rpartition("-")
     if not sep or suffix.lower() not in KNOWN_BASE_IMAGE_SUFFIXES:
@@ -218,7 +240,37 @@ def _strip_known_base_image_suffix(tag: str) -> str | None:
         Version(prefix)
     except InvalidVersion:
         return None
-    return prefix
+    return prefix, suffix.lower()
+
+
+def _strip_known_base_image_suffix(tag: str) -> str | None:
+    """The `<version>` part of `tag`, per _split_known_suffix() above, or
+    None. Only ever called as a fallback after a direct Version(tag) has
+    already failed — see rank_final_versions()."""
+    match = _split_known_suffix(tag)
+    return match[0] if match else None
+
+
+def known_base_image_suffix(tag: str) -> str | None:
+    """The tag's own known base-image/build-variant suffix (lowercased),
+    per _split_known_suffix() above, or None if it has no recognized
+    suffix (no trailing `-<word>` at all, an unrecognized word, or a
+    prefix that isn't a valid version on its own).
+
+    Unlike _strip_known_base_image_suffix(), also meaningful for a tag
+    that *does* parse directly as a Version (e.g. checking a service's
+    own pinned tag, "29.8.1-cli", for its suffix) — this is a standalone
+    query, not just rank_final_versions()'s internal fallback step. Used
+    by tag_walk_coordinator.py's prioritize_by_suffix() to tell whether a
+    service's pinned tag and a given candidate tag share the same known
+    suffix, since two candidates that are Version-equal after stripping
+    (e.g. "29.8.1" and "29.8.1-cli") are indistinguishable to
+    rank_final_versions()'s own tie-break, but only one of them can ever
+    share a same-suffix-pinned service's digest — see
+    REGISTRY_TAG_WALK_SPEC.md's build-variant-suffix amendment.
+    """
+    match = _split_known_suffix(tag)
+    return match[1] if match else None
 
 
 def rank_final_versions(tags: list[str]) -> list[str]:
@@ -336,3 +388,41 @@ def is_not_behind(pinned_digest: str | None, local_digest: str | None) -> bool:
     verified against local_digest.
     """
     return bool(pinned_digest) and bool(local_digest) and pinned_digest == local_digest
+
+
+def prioritize_by_suffix(ranked: list[str], pinned_suffix: str | None) -> list[str]:
+    """Reorder `ranked` (already rank_final_versions()'d, newest first) so
+    every candidate sharing `pinned_suffix` comes first, followed by
+    every other candidate — a stable partition, not a re-sort: relative
+    (newest-first) order within each group is preserved. A no-op
+    (returns `ranked` unchanged) when `pinned_suffix` is None, i.e. the
+    pinned tag itself has no recognized base-image/build-variant suffix
+    — the overwhelming majority of services, whose search behavior this
+    must leave untouched.
+
+    Used by tag_walk_coordinator.py to reorder the candidate list *before*
+    bounding it to PULL_TARGET_MAX_DIGEST_LOOKUPS for its
+    pull_target_version/verified_current_version digest searches — never
+    by select_newest_version_tag()/latest_registry_tag, which stays
+    variant-agnostic on purpose (see REGISTRY_TAG_WALK_SPEC.md's
+    build-variant-suffix amendment for why that split is deliberate, not
+    an oversight).
+
+    Reordering before bounding (not after) matters for a service that's
+    several versions behind: without it, the top N candidates could be
+    entirely consumed by other-suffix ties of newer versions (e.g. every
+    variant of the newest release) before ever reaching that service's
+    own suffix further down the list — even though a same-suffix,
+    older-version candidate is exactly the one this search needs to find
+    first. Only ever reorders; never drops or invents a candidate, so
+    this cannot introduce a new false match — a wrong search order still
+    only costs extra failed manifest lookups within the same existing
+    budget, never a wrong answer, per this module's existing
+    digest-verified-consumer safety property (see KNOWN_BASE_IMAGE_SUFFIXES
+    and rank_final_versions() above).
+    """
+    if pinned_suffix is None:
+        return ranked
+    same_suffix = [t for t in ranked if known_base_image_suffix(t) == pinned_suffix]
+    other = [t for t in ranked if known_base_image_suffix(t) != pinned_suffix]
+    return same_suffix + other

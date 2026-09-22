@@ -124,8 +124,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # PULL_TARGET_VERSION_SPEC.md's update_available-transition amendment.
     update_coordinator.set_transition_callback(tag_walk_coordinator.async_refresh_stacks)
 
+    # tag_walk_coordinator passed in so detect_version()'s
+    # verified_current_version fallback can read its already-computed
+    # digest cross-reference for each service — see
+    # UNVERIFIED_DETECTED_VERSION_SPEC.md's verified-current-version
+    # amendment. Built after tag_walk_coordinator for the same reason
+    # noted above (a coordinator that reads another's data must be
+    # constructed after it exists).
     github_coordinator = GitHubReleaseCoordinator(
-        hass, engine, coordinator, digest_history, coordinator_label
+        hass, engine, coordinator, digest_history, tag_walk_coordinator, coordinator_label
     )
     await github_coordinator.async_config_entry_first_refresh()
 

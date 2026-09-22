@@ -12,12 +12,17 @@ the same image/container labels:
   looks like a real version — zero network calls, "detect and display
   what we already know," not a comparison. Independent of both
   update-available and the GitHub lookup; none of these three signals
-  imply or corroborate each other. Extended with one final, unverified
-  fallback (UNVERIFIED_DETECTED_VERSION_SPEC.md): a persisted snapshot of
-  latest_registry_tag from the last successful pull, read from
-  DigestHistoryStore here and passed into detect_version() — the only I/O
-  this coordinator does specifically for that fallback, and only ever
-  used if every other check in detect_version()'s chain comes back empty.
+  imply or corroborate each other. Extended with two further fallbacks,
+  checked in this order, only if every check ahead of them comes back
+  empty: `verified_current_version` (UNVERIFIED_DETECTED_VERSION_SPEC.md's
+  verified-current-version amendment) — a live registry-tag/digest
+  cross-reference already computed by TagWalkCoordinator, read from it
+  here at zero extra I/O, for a service pinned to a floating tag with
+  nothing else to go on; then, strictly last resort, `assumed_version`
+  (UNVERIFIED_DETECTED_VERSION_SPEC.md's original amendment) — a
+  persisted snapshot of `latest_registry_tag` from the last successful
+  pull, read from DigestHistoryStore here. Both are passed into
+  detect_version(), which decides the actual priority order.
 
 Polls infrequently: unauthenticated GitHub API is capped at 60
 requests/hour, and neither a project's latest release nor a locally
@@ -53,6 +58,7 @@ from .engine import ContainerInfo, DockerEngineClient
 from .github_release import OCI_SOURCE_LABEL, GitHubRelease, fetch_latest_release, parse_github_repo
 from .oci_labels import resolve_label
 from .storage import DigestHistoryStore
+from .tag_walk_coordinator import TagWalkCoordinator
 from .version_detect import detect_version
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,6 +87,7 @@ class GitHubReleaseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Service
         engine: DockerEngineClient,
         stacks_coordinator: StacksCoordinator,
         digest_history: DigestHistoryStore,
+        tag_walk_coordinator: TagWalkCoordinator,
         label: str,
         update_interval: timedelta = DEFAULT_GITHUB_CHECK_INTERVAL,
     ) -> None:
@@ -96,6 +103,14 @@ class GitHubReleaseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Service
         self._engine = engine
         self._stacks_coordinator = stacks_coordinator
         self._digest_history = digest_history
+        # Cross-coordinator read, same established pattern as
+        # tag_walk_coordinator.py's own read of update_coordinator's data
+        # (see that module's docstring) — supplies
+        # detect_version()'s verified_current_version fallback with the
+        # digest cross-reference TagWalkCoordinator already computed, at
+        # zero extra I/O here. See UNVERIFIED_DETECTED_VERSION_SPEC.md's
+        # verified-current-version amendment.
+        self._tag_walk_coordinator = tag_walk_coordinator
         self._session = async_get_clientsession(hass)
 
     @property
@@ -148,13 +163,27 @@ class GitHubReleaseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Service
         release = await self._check_github_release(
             stack_name, service_name, image_ref, image_labels, container_labels
         )
+        # verified_current_version: TagWalkCoordinator's own live digest
+        # cross-reference for this exact service, already computed on its
+        # own (much slower) cadence — read here, not fetched, so this
+        # coordinator's own poll cycle costs nothing extra for it. May be
+        # None (no tag-walk data yet for this stack/service, or no match
+        # found) — detect_version() treats that exactly like "not
+        # supplied" and falls through.
+        tag_walk_data = (self._tag_walk_coordinator.data or {}).get(stack_name, {})
+        tag_walk_status = tag_walk_data.get(service_name)
+        verified_current_version = (
+            tag_walk_status.verified_current_version if tag_walk_status else None
+        )
+
         # Strictly last-resort, unverified fallback — see
         # UNVERIFIED_DETECTED_VERSION_SPEC.md. Only ever reaches
         # detect_version()'s return value if every check ahead of it
-        # (image label, container label, pinned-tag shape) comes back
-        # empty; this coordinator has no opinion on that priority order,
-        # it just supplies the one extra data point detect_version()
-        # itself doesn't have I/O access to fetch.
+        # (image label, container label, pinned-tag shape,
+        # verified_current_version) comes back empty; this coordinator
+        # has no opinion on that priority order, it just supplies the two
+        # extra data points detect_version() itself doesn't have I/O
+        # access to fetch.
         history_record = self._digest_history.get(stack_name, service_name) or {}
         assumed_version = history_record.get("assumed_version")
         detected_version = detect_version(
@@ -163,6 +192,7 @@ class GitHubReleaseCoordinator(DataUpdateCoordinator[dict[str, dict[str, Service
             container_labels,
             stack_name=stack_name,
             service_name=service_name,
+            verified_current_version=verified_current_version,
             assumed_version=assumed_version,
         )
 

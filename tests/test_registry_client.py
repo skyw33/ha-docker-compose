@@ -1,7 +1,12 @@
+import asyncio
+from unittest.mock import patch
+
 import pytest
 
 from ha_docker_compose.registry_client import (
+    MAX_CONCURRENT_REQUESTS_PER_REGISTRY,
     REGISTRIES,
+    TAG_LIST_MAX_DURATION_SECONDS,
     TAG_LIST_MAX_PAGES,
     TAG_LIST_PAGE_SIZE,
     RegistryAuthError,
@@ -24,6 +29,36 @@ class FakeResponse:
         return self
 
     async def __aexit__(self, *exc):
+        return False
+
+
+class ConcurrencyTrackingResponse:
+    """Same shape as FakeResponse, but records how many instances are
+    simultaneously "inside" their async context manager (i.e. simulating
+    a request still in flight) via a shared tracker dict — used to prove
+    RegistryClient's semaphore actually bounds concurrency, not just that
+    it doesn't crash. Deliberately polymorphic (valid as either a token
+    response or a manifest/tags response — same json_data shape, same
+    headers) since which one several concurrent calls actually consume
+    it as isn't deterministic under real concurrent scheduling."""
+
+    def __init__(self, tracker: dict, delay: float = 0.05, status: int = 200):
+        self.status = status
+        self._tracker = tracker
+        self._delay = delay
+        self.headers = {"Docker-Content-Digest": "sha256:" + "a" * 64}
+
+    async def json(self, content_type=None):
+        return {"token": "tok"}
+
+    async def __aenter__(self):
+        self._tracker["current"] += 1
+        self._tracker["peak"] = max(self._tracker["peak"], self._tracker["current"])
+        await asyncio.sleep(self._delay)
+        return self
+
+    async def __aexit__(self, *exc):
+        self._tracker["current"] -= 1
         return False
 
 
@@ -317,3 +352,69 @@ async def test_list_tags_pagination_cap_warning_names_repo_and_context(caplog) -
     assert "owner/repo" in warnings[0]
     assert "stack media, service frigate" in warnings[0]
     assert "pagination cap" in warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_registry_calls_bounded_by_semaphore() -> None:
+    """The confirmed real failure this exists to prevent: a Reload-
+    triggered sweep fired simultaneous manifest lookups across several
+    stacks at once, producing concurrent HTTP 429s from the same
+    registry within the same ~1-second window. Proves the semaphore
+    actually bounds peak concurrency, not just that nothing crashes."""
+    tracker = {"current": 0, "peak": 0}
+    concurrent_calls = 10
+    # 2 requests per get_manifest_digest call (token + manifest); every
+    # response is polymorphic (see ConcurrencyTrackingResponse) so it
+    # doesn't matter which purpose a given pop() ends up serving under
+    # real concurrent interleaving.
+    session = FakeSession([ConcurrencyTrackingResponse(tracker) for _ in range(concurrent_calls * 2)])
+    client = RegistryClient(session)
+
+    await asyncio.gather(
+        *(client.get_manifest_digest(f"nginx:tag{i}") for i in range(concurrent_calls))
+    )
+
+    assert tracker["peak"] <= MAX_CONCURRENT_REQUESTS_PER_REGISTRY
+    # Sanity check the test itself achieved real overlap — otherwise a
+    # peak of 1 would trivially (and wrongly) "pass" a <= assertion even
+    # with the semaphore completely broken/absent.
+    assert tracker["peak"] > 1
+
+
+@pytest.mark.asyncio
+async def test_list_tags_wall_clock_safety_valve(caplog) -> None:
+    """Distinct from the page-count cap: bounds one list_tags() call's
+    wall-clock duration directly, checked before starting each page's
+    request. Simulates time jumping past the limit between the first and
+    second page checks via a patched time.monotonic(), so this is
+    deterministic and doesn't depend on real sleep/timing."""
+    registry_url = REGISTRIES["ghcr.io"].registry_url
+    next_url = f"{registry_url}/v2/owner/repo/tags/list?last=a&n={TAG_LIST_PAGE_SIZE}"
+    session = FakeSession(
+        [
+            FakeResponse(status=200, json_data={"token": "tok"}),
+            FakeResponse(
+                status=200,
+                json_data={"tags": ["a"]},
+                headers={"Link": f'<{next_url}>; rel="next"'},
+            ),
+            # Deliberately no second page response — the wall-clock check
+            # must stop the loop before a page-2 request is ever made.
+        ]
+    )
+    client = RegistryClient(session)
+
+    timestamps = iter([0.0, 0.0, TAG_LIST_MAX_DURATION_SECONDS + 1])
+    with patch(
+        "ha_docker_compose.registry_client.time.monotonic", side_effect=lambda: next(timestamps)
+    ):
+        with caplog.at_level("WARNING"):
+            tags = await client.list_tags("ghcr.io/owner/repo:latest", log_context="test")
+
+    assert tags == ["a"]
+    assert len(session.calls) == 2  # token + page 1 only
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "wall-clock" in warnings[0]
+    assert "owner/repo" in warnings[0]
+    assert "test" in warnings[0]

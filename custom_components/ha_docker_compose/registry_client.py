@@ -15,8 +15,10 @@ by force-fitting them into this client.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 import aiohttp
@@ -73,6 +75,53 @@ TAG_LIST_PAGE_SIZE = 1000
 # than this is unexpected enough to log for visibility.
 UNPAGINATED_LARGE_PAGE_THRESHOLD = 500
 
+# Wall-clock safety valve for one list_tags() call, independent of
+# TAG_LIST_MAX_PAGES (a request-count bound, not a time bound) — added
+# after MAX_CONCURRENT_REQUESTS_PER_REGISTRY below made a single call's
+# own page fetches compete for a shared, limited number of concurrent
+# slots: a call can now legitimately take longer in wall-clock time than
+# before at the exact same page count, simply from waiting its turn.
+# 60s comfortably covers a full TAG_LIST_MAX_PAGES walk even under real
+# contention (each page fetch is normally well under a second; even
+# queued behind other callers for its share of
+# MAX_CONCURRENT_REQUESTS_PER_REGISTRY slots, 50 pages shouldn't need
+# anywhere near this), while still bounding the worst case: one
+# degraded/contended service's tag walk can't stall its own stack's
+# other services indefinitely (_walk_stack() awaits services within one
+# stack sequentially — see tag_walk_coordinator.py).
+TAG_LIST_MAX_DURATION_SECONDS = 60.0
+
+# How many concurrent in-flight HTTP requests this client allows against
+# one registry host at once — shared across every call this client makes
+# (get_manifest_digest and list_tags alike), and, since this client is
+# now constructed once per config entry and passed to both
+# UpdateCheckCoordinator and TagWalkCoordinator (see __init__.py) rather
+# than each constructing its own, shared across both of those
+# independently-scheduled coordinators' sweeps too — that gap (two
+# unrelated schedules bursting past each other with no shared limit) is
+# exactly the confirmed failure mode: a Reload-triggered full sweep
+# produced simultaneous HTTP 429s, within the same ~1-second window,
+# across at least three different stacks' concurrent digest-search
+# manifest lookups.
+#
+# 3 chosen as a deliberately conservative starting point, not a
+# calculated optimum — neither registry publishes a precise anonymous
+# concurrent-request limit to size this against exactly. What's known:
+# the observed storm involved several stacks' worth of candidate
+# lookups overlapping at once (each service's own search is already
+# sequential internally — tag_walk_coordinator.py's
+# _search_ranked_for_digest awaits one manifest fetch at a time — so the
+# burst came entirely from *different* stacks/services running
+# concurrently via asyncio.gather(), not from within one service's own
+# loop), which was almost certainly well above 3 simultaneous requests
+# for any install with more than a couple of registry-backed services.
+# Capping at 3 is a large, deliberate cut from that; low enough to make
+# a repeat of "multiple simultaneous 429s" very unlikely, high enough to
+# avoid fully serializing a large sweep down to one request at a time.
+# Not meant as a final, precisely-tuned number — meant to be revisited
+# from real logs after this ships.
+MAX_CONCURRENT_REQUESTS_PER_REGISTRY = 3
+
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?')
 
 
@@ -125,6 +174,18 @@ class RegistryClient:
     def __init__(self, session: aiohttp.ClientSession, timeout: float = 10.0) -> None:
         self._session = session
         self._timeout = aiohttp.ClientTimeout(total=timeout)
+        # One semaphore per registry host, built once here and held for
+        # this client's lifetime — see MAX_CONCURRENT_REQUESTS_PER_REGISTRY.
+        # Acquired around each individual HTTP request (token fetch,
+        # manifest fetch, or one tags/list page), not around a whole
+        # logical operation — a single list_tags() call pages through up
+        # to TAG_LIST_MAX_PAGES requests, and holding one of only
+        # MAX_CONCURRENT_REQUESTS_PER_REGISTRY slots for that entire walk
+        # would let one big tag walk starve every other concurrent
+        # caller's requests to the same registry for its whole duration.
+        self._semaphores: dict[str, asyncio.Semaphore] = {
+            name: asyncio.Semaphore(MAX_CONCURRENT_REQUESTS_PER_REGISTRY) for name in REGISTRIES
+        }
 
     async def get_manifest_digest(self, image_ref: str) -> str:
         """Return the remote manifest digest for image_ref (e.g. 'nginx:latest').
@@ -138,8 +199,9 @@ class RegistryClient:
         if config is None:
             raise RegistryUnsupportedError(f"Unsupported registry: {parsed.registry}")
 
-        token = await self._get_token(config, parsed.repository)
-        return await self._get_digest(config, parsed.repository, parsed.tag, token)
+        semaphore = self._semaphores[parsed.registry]
+        token = await self._get_token(config, parsed.repository, semaphore)
+        return await self._get_digest(config, parsed.repository, parsed.tag, token, semaphore)
 
     async def list_tags(self, image_ref: str, *, log_context: str) -> list[str]:
         """Return every tag published on image_ref's repository (the tag
@@ -165,20 +227,24 @@ class RegistryClient:
         if config is None:
             raise RegistryUnsupportedError(f"Unsupported registry: {parsed.registry}")
 
-        token = await self._get_token(config, parsed.repository)
-        return await self._get_tags(config, parsed.repository, token, log_context)
+        semaphore = self._semaphores[parsed.registry]
+        token = await self._get_token(config, parsed.repository, semaphore)
+        return await self._get_tags(config, parsed.repository, token, log_context, semaphore)
 
-    async def _get_token(self, config: RegistryConfig, repository: str) -> str:
+    async def _get_token(
+        self, config: RegistryConfig, repository: str, semaphore: asyncio.Semaphore
+    ) -> str:
         params = {"service": config.service, "scope": f"repository:{repository}:pull"}
         try:
-            async with self._session.get(
-                config.auth_url, params=params, timeout=self._timeout
-            ) as resp:
-                if resp.status in (401, 403):
-                    raise RegistryAuthError(f"Auth token request denied ({resp.status})")
-                if resp.status != 200:
-                    raise RegistryError(f"Token request failed: HTTP {resp.status}")
-                data = await resp.json(content_type=None)
+            async with semaphore:
+                async with self._session.get(
+                    config.auth_url, params=params, timeout=self._timeout
+                ) as resp:
+                    if resp.status in (401, 403):
+                        raise RegistryAuthError(f"Auth token request denied ({resp.status})")
+                    if resp.status != 200:
+                        raise RegistryError(f"Token request failed: HTTP {resp.status}")
+                    data = await resp.json(content_type=None)
         except aiohttp.ClientError as err:
             raise RegistryError(f"Token request failed: {err}") from err
         except TimeoutError as err:
@@ -189,16 +255,24 @@ class RegistryClient:
             raise RegistryError("Token response had no token/access_token field")
         return token
 
-    async def _get_digest(self, config: RegistryConfig, repository: str, tag: str, token: str) -> str:
+    async def _get_digest(
+        self,
+        config: RegistryConfig,
+        repository: str,
+        tag: str,
+        token: str,
+        semaphore: asyncio.Semaphore,
+    ) -> str:
         url = f"{config.registry_url}/v2/{repository}/manifests/{tag}"
         headers = {"Authorization": f"Bearer {token}", "Accept": MANIFEST_ACCEPT_HEADER}
         try:
-            async with self._session.get(url, headers=headers, timeout=self._timeout) as resp:
-                if resp.status in (401, 403):
-                    raise RegistryAuthError(f"Manifest request denied ({resp.status})")
-                if resp.status != 200:
-                    raise RegistryError(f"Manifest request failed: HTTP {resp.status}")
-                digest = resp.headers.get("Docker-Content-Digest")
+            async with semaphore:
+                async with self._session.get(url, headers=headers, timeout=self._timeout) as resp:
+                    if resp.status in (401, 403):
+                        raise RegistryAuthError(f"Manifest request denied ({resp.status})")
+                    if resp.status != 200:
+                        raise RegistryError(f"Manifest request failed: HTTP {resp.status}")
+                    digest = resp.headers.get("Docker-Content-Digest")
         except aiohttp.ClientError as err:
             raise RegistryError(f"Manifest request failed: {err}") from err
         except TimeoutError as err:
@@ -209,7 +283,12 @@ class RegistryClient:
         return digest
 
     async def _get_tags(
-        self, config: RegistryConfig, repository: str, token: str, log_context: str
+        self,
+        config: RegistryConfig,
+        repository: str,
+        token: str,
+        log_context: str,
+        semaphore: asyncio.Semaphore,
     ) -> list[str]:
         # n= only needs setting on this first request — the registry's own
         # Link header for every subsequent page already carries it forward
@@ -218,17 +297,40 @@ class RegistryClient:
         url = f"{config.registry_url}/v2/{repository}/tags/list?n={TAG_LIST_PAGE_SIZE}"
         headers = {"Authorization": f"Bearer {token}"}
         tags: list[str] = []
+        started = time.monotonic()
 
         for page_num in range(1, TAG_LIST_MAX_PAGES + 1):
+            elapsed = time.monotonic() - started
+            if elapsed > TAG_LIST_MAX_DURATION_SECONDS:
+                # Distinct from the page-cap case below (that's a request
+                # *count* bound; this is a wall-clock bound) — see
+                # TAG_LIST_MAX_DURATION_SECONDS's own docstring for why
+                # both exist. Checked before starting another page's
+                # request, not after, so this can't be pushed arbitrarily
+                # past the budget by one slow-to-respond page.
+                _LOGGER.warning(
+                    "Tag list for %s (%s) hit the %.0fs wall-clock limit after %d page(s) "
+                    "(%d tags fetched) — result may be incomplete",
+                    repository,
+                    log_context,
+                    TAG_LIST_MAX_DURATION_SECONDS,
+                    page_num - 1,
+                    len(tags),
+                )
+                return tags
+
             try:
-                async with self._session.get(url, headers=headers, timeout=self._timeout) as resp:
-                    if resp.status in (401, 403):
-                        raise RegistryAuthError(f"Tag list request denied ({resp.status})")
-                    if resp.status != 200:
-                        raise RegistryError(f"Tag list request failed: HTTP {resp.status}")
-                    data = await resp.json(content_type=None)
-                    link_header = resp.headers.get("Link")
-                    next_url = _parse_next_link(link_header, config.registry_url)
+                async with semaphore:
+                    async with self._session.get(
+                        url, headers=headers, timeout=self._timeout
+                    ) as resp:
+                        if resp.status in (401, 403):
+                            raise RegistryAuthError(f"Tag list request denied ({resp.status})")
+                        if resp.status != 200:
+                            raise RegistryError(f"Tag list request failed: HTTP {resp.status}")
+                        data = await resp.json(content_type=None)
+                        link_header = resp.headers.get("Link")
+                        next_url = _parse_next_link(link_header, config.registry_url)
             except aiohttp.ClientError as err:
                 raise RegistryError(f"Tag list request failed: {err}") from err
             except TimeoutError as err:

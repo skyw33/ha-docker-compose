@@ -43,6 +43,28 @@ MANIFEST_ACCEPT_HEADER = ", ".join(
 # handing back a `next` link — not expected to ever be hit in practice.
 TAG_LIST_MAX_PAGES = 50
 
+# Requested explicitly via `?n=` on every tags/list call — confirmed by
+# direct testing against ghcr.io that omitting this entirely (as this
+# client did before) gets ghcr.io's own default of 100 tags/page, while
+# 1000 is honored exactly and is also the observed ceiling (requesting
+# more, e.g. 5000 or 10000, still returns only 1000 — ghcr.io silently
+# clamps rather than erroring). At the previous no-`n=` default, a repo
+# with enough non-version noise tags (e.g. per-commit CI builds) could
+# exhaust the entire TAG_LIST_MAX_PAGES budget (50 x 100 = 5,000 tags)
+# without ever reaching a real, wanted version tag that happened to sit
+# later in the registry's own ordering — confirmed real case:
+# ghcr.io/blakeblackshear/frigate, 15,000+ tags, dominated by per-commit
+# dev tags, where the actual current release tag never appeared within
+# the old 5,000-tag budget at all. Also tested against Docker Hub: with
+# no `n=` at all, Hub returns everything unpaginated for a repo under its
+# own threshold (confirmed: 1339 tags, one response, no Link header) —
+# sending an explicit `n=1000` there instead makes Hub paginate a repo
+# that size into two requests rather than one. A minor, accepted
+# trade-off for using one shared value/implementation across both
+# registries rather than special-casing per registry — see this module's
+# own docstring on why that's the design here.
+TAG_LIST_PAGE_SIZE = 1000
+
 # Purely diagnostic (see the info-log call site in _get_tags): direct
 # testing against ghcr.io/esphome/esphome (2,890+ tags) consistently
 # showed a per-page cap around 100-1000 tags with a Link header attached
@@ -119,7 +141,7 @@ class RegistryClient:
         token = await self._get_token(config, parsed.repository)
         return await self._get_digest(config, parsed.repository, parsed.tag, token)
 
-    async def list_tags(self, image_ref: str) -> list[str]:
+    async def list_tags(self, image_ref: str, *, log_context: str) -> list[str]:
         """Return every tag published on image_ref's repository (the tag
         portion of image_ref itself is ignored — this lists the whole
         repository), handling pagination if the registry returns one.
@@ -128,6 +150,15 @@ class RegistryClient:
         distinction as get_manifest_digest, for the same reason: callers
         need to tell "permanently can't check this" apart from "transient
         failure, keep the last known value".
+
+        log_context: a caller-supplied label (e.g. "stack X, service Y")
+        included in this method's own diagnostic logs — required, not
+        optional, since there's exactly one caller today
+        (tag_walk_coordinator.py) and it always has this on hand. This
+        client stays registry-generic otherwise (no notion of "stack" or
+        "service" anywhere else in it) — it's purely for making a
+        pagination-cap warning or a page-by-page debug trace identifiable
+        without cross-referencing the repository name back to a stack.
         """
         parsed = parse_image_ref(image_ref)
         config = REGISTRIES.get(parsed.registry)
@@ -135,7 +166,7 @@ class RegistryClient:
             raise RegistryUnsupportedError(f"Unsupported registry: {parsed.registry}")
 
         token = await self._get_token(config, parsed.repository)
-        return await self._get_tags(config, parsed.repository, token)
+        return await self._get_tags(config, parsed.repository, token, log_context)
 
     async def _get_token(self, config: RegistryConfig, repository: str) -> str:
         params = {"service": config.service, "scope": f"repository:{repository}:pull"}
@@ -177,8 +208,14 @@ class RegistryClient:
             raise RegistryError("Manifest response had no Docker-Content-Digest header")
         return digest
 
-    async def _get_tags(self, config: RegistryConfig, repository: str, token: str) -> list[str]:
-        url = f"{config.registry_url}/v2/{repository}/tags/list"
+    async def _get_tags(
+        self, config: RegistryConfig, repository: str, token: str, log_context: str
+    ) -> list[str]:
+        # n= only needs setting on this first request — the registry's own
+        # Link header for every subsequent page already carries it forward
+        # (confirmed by direct testing), so _parse_next_link()'s URLs never
+        # need it re-added.
+        url = f"{config.registry_url}/v2/{repository}/tags/list?n={TAG_LIST_PAGE_SIZE}"
         headers = {"Authorization": f"Bearer {token}"}
         tags: list[str] = []
 
@@ -204,9 +241,10 @@ class RegistryClient:
             # tag shows up (or is missing) downstream and it's unclear
             # whether the registry sent it or a later stage introduced it.
             _LOGGER.debug(
-                "list_tags(%s): page %d fetched %d tags (running total %d), Link header=%r, "
-                "next_url=%r",
+                "list_tags(%s, %s): page %d fetched %d tags (running total %d), Link "
+                "header=%r, next_url=%r",
                 repository,
+                log_context,
                 page_num,
                 len(page_tags),
                 len(tags),
@@ -228,11 +266,12 @@ class RegistryClient:
                     # actually doing that, so it's flagged rather than
                     # silently trusted.
                     _LOGGER.info(
-                        "list_tags(%s): page %d returned %d tags with no Link header for "
+                        "list_tags(%s, %s): page %d returned %d tags with no Link header for "
                         "continuation — unusually large for a single unpaginated page compared "
                         "to this registry's normal per-page behavior; noting in case pagination "
                         "behavior is inconsistent for this repository",
                         repository,
+                        log_context,
                         page_num,
                         len(page_tags),
                     )
@@ -240,9 +279,10 @@ class RegistryClient:
             url = next_url
         else:
             _LOGGER.warning(
-                "Tag list for %s hit the %d-page pagination cap (%d tags fetched) — result may "
-                "be incomplete",
+                "Tag list for %s (%s) hit the %d-page pagination cap (%d tags fetched) — "
+                "result may be incomplete",
                 repository,
+                log_context,
                 TAG_LIST_MAX_PAGES,
                 len(tags),
             )

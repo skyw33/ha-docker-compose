@@ -2,6 +2,8 @@ import pytest
 
 from ha_docker_compose.registry_client import (
     REGISTRIES,
+    TAG_LIST_MAX_PAGES,
+    TAG_LIST_PAGE_SIZE,
     RegistryAuthError,
     RegistryClient,
     RegistryError,
@@ -150,12 +152,12 @@ async def test_list_tags_single_page() -> None:
     )
     client = RegistryClient(session)
 
-    tags = await client.list_tags("nginx:latest")
+    tags = await client.list_tags("nginx:latest", log_context="test")
 
     assert tags == ["1.0.0", "2.0.0", "latest"]
     assert (
         session.calls[1]["url"]
-        == f"{REGISTRIES['docker.io'].registry_url}/v2/library/nginx/tags/list"
+        == f"{REGISTRIES['docker.io'].registry_url}/v2/library/nginx/tags/list?n={TAG_LIST_PAGE_SIZE}"
     )
     assert session.calls[1]["headers"]["Authorization"] == "Bearer abc123"
 
@@ -177,7 +179,7 @@ async def test_list_tags_follows_link_header_pagination() -> None:
     )
     client = RegistryClient(session)
 
-    tags = await client.list_tags("ghcr.io/owner/repo:latest")
+    tags = await client.list_tags("ghcr.io/owner/repo:latest", log_context="test")
 
     assert tags == ["a", "b", "c"]
     assert session.calls[2]["url"] == next_url
@@ -199,7 +201,7 @@ async def test_list_tags_resolves_relative_link_header() -> None:
     )
     client = RegistryClient(session)
 
-    tags = await client.list_tags("nginx:latest")
+    tags = await client.list_tags("nginx:latest", log_context="test")
 
     assert tags == ["1.0.0", "2.0.0"]
     assert session.calls[2]["url"] == f"{registry_url}/v2/library/nginx/tags/list?last=1.0.0"
@@ -211,7 +213,7 @@ async def test_list_tags_unsupported_registry_raises_without_network_call() -> N
     client = RegistryClient(session)
 
     with pytest.raises(RegistryUnsupportedError):
-        await client.list_tags("quay.io/owner/repo:tag")
+        await client.list_tags("quay.io/owner/repo:tag", log_context="test")
 
     assert session.calls == []
 
@@ -222,7 +224,7 @@ async def test_list_tags_auth_denied() -> None:
     client = RegistryClient(session)
 
     with pytest.raises(RegistryAuthError):
-        await client.list_tags("ghcr.io/owner/private:latest")
+        await client.list_tags("ghcr.io/owner/private:latest", log_context="test")
 
 
 @pytest.mark.asyncio
@@ -240,7 +242,7 @@ async def test_list_tags_large_unpaginated_page_is_still_returned_correctly(capl
     client = RegistryClient(session)
 
     with caplog.at_level("INFO"):
-        tags = await client.list_tags("nginx:latest")
+        tags = await client.list_tags("nginx:latest", log_context="test")
 
     assert tags == big_page
     assert any("unusually large" in record.message for record in caplog.records)
@@ -257,4 +259,61 @@ async def test_list_tags_request_failure_raises_registry_error() -> None:
     client = RegistryClient(session)
 
     with pytest.raises(RegistryError):
-        await client.list_tags("nginx:latest")
+        await client.list_tags("nginx:latest", log_context="test")
+
+
+@pytest.mark.asyncio
+async def test_list_tags_first_request_includes_explicit_page_size() -> None:
+    """Confirmed by direct testing against ghcr.io: omitting `n=` entirely
+    gets its own default of 100 tags/page, while an explicit `n=1000` is
+    honored (and is also the observed ceiling) — see TAG_LIST_PAGE_SIZE's
+    own docstring. A repo dominated by non-version tags (confirmed real
+    case: ghcr.io/blakeblackshear/frigate, 15,000+ tags) could exhaust the
+    old 5,000-tag budget (50 pages x the old 100/page default) without
+    ever reaching a real version tag sitting later in the registry's own
+    order."""
+    session = FakeSession(
+        [
+            FakeResponse(status=200, json_data={"token": "abc123"}),
+            FakeResponse(status=200, json_data={"tags": ["1.0.0"]}),
+        ]
+    )
+    client = RegistryClient(session)
+
+    await client.list_tags("nginx:latest", log_context="test")
+
+    assert session.calls[1]["url"].endswith(f"?n={TAG_LIST_PAGE_SIZE}")
+    assert TAG_LIST_PAGE_SIZE >= 1000  # the verified ghcr.io ceiling
+
+
+@pytest.mark.asyncio
+async def test_list_tags_pagination_cap_warning_names_repo_and_context(caplog) -> None:
+    """The pagination-cap warning must identify which repo AND which
+    stack/service it was for — with only the repo name (as before), the
+    log line alone can't tell you where to look in your own compose
+    files."""
+    registry_url = REGISTRIES["ghcr.io"].registry_url
+    responses = [FakeResponse(status=200, json_data={"token": "tok"})]
+    for page in range(TAG_LIST_MAX_PAGES):
+        next_url = f"{registry_url}/v2/owner/repo/tags/list?last=tag{page}"
+        responses.append(
+            FakeResponse(
+                status=200,
+                json_data={"tags": [f"tag{page}"]},
+                headers={"Link": f'<{next_url}>; rel="next"'},
+            )
+        )
+    session = FakeSession(responses)
+    client = RegistryClient(session)
+
+    with caplog.at_level("WARNING"):
+        tags = await client.list_tags(
+            "ghcr.io/owner/repo:latest", log_context="stack media, service frigate"
+        )
+
+    assert len(tags) == TAG_LIST_MAX_PAGES
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "owner/repo" in warnings[0]
+    assert "stack media, service frigate" in warnings[0]
+    assert "pagination cap" in warnings[0]

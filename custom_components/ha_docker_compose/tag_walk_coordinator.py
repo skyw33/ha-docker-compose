@@ -287,7 +287,9 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         service_key = (stack_name, service_name)
 
         try:
-            raw_tags = await self._registry_client.list_tags(image_ref)
+            raw_tags = await self._registry_client.list_tags(
+                image_ref, log_context=f"stack {stack_name}, service {service_name}"
+            )
         except RegistryUnsupportedError:
             if service_key not in self._warned_unsupported:
                 _LOGGER.warning(

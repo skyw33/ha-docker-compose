@@ -153,6 +153,74 @@ def filter_tags(
     return candidates
 
 
+# Curated, deliberately narrow — Docker base-image/distro identifiers
+# only, the way they commonly appear as a tag's trailing `-<word>` (e.g.
+# "2.1.2-alpine"). NOT "any word packaging.version.Version doesn't
+# recognize" (confirmed real case for why that would be unsafe: a tag
+# suffixed "-nightly" or "-snapshot" would also fail to parse directly,
+# and blindly stripping *any* unrecognized suffix would wrongly promote
+# an unstable/non-final build to "latest final release" for
+# select_newest_version_tag(), which has no verification step to catch
+# it — unlike pull_target_version/verified_current_version, where a
+# wrong strip only costs an extra, ultimately-failing digest lookup, not
+# a wrong answer). Confirmed none of these collide with packaging's own
+# recognized pre/post/dev-release keywords (alpha/a/beta/b/preview/pre/
+# c/rc/post/rev/r/dev) — direct test, not assumed.
+#
+# Real, confirmed case this exists for: eclipse-mosquitto publishes its
+# 2.1.x line *only* as "2.1.2-alpine" etc. — no bare "2.1.2" tag exists
+# at all (confirmed live against Docker Hub) — while its older 1.x/2.0.x
+# lines publish both a bare tag and a "-openssl" variant of the exact
+# same version. Scoped to Linux base images only (this integration's own
+# domain); Windows-container base tags (nanoserver, windowsservercore)
+# deliberately left out.
+KNOWN_BASE_IMAGE_SUFFIXES = frozenset(
+    {
+        "alpine",
+        "slim",
+        "debian",
+        "ubuntu",
+        "distroless",
+        "bookworm",
+        "bullseye",
+        "buster",
+        "stretch",
+        "trixie",
+        "focal",
+        "jammy",
+        "noble",
+        "bionic",
+        "xenial",
+    }
+)
+
+
+def _strip_known_base_image_suffix(tag: str) -> str | None:
+    """If `tag` doesn't parse directly but is `<version>-<suffix>` where
+    `suffix` (case-insensitive) is a known base-image/distro identifier
+    and `<version>` parses cleanly on its own, return `<version>`;
+    otherwise None. Only ever called as a fallback after a direct
+    Version(tag) has already failed — see rank_final_versions().
+
+    Single trailing suffix only (rpartition on the last "-"): a tag like
+    "3.12-slim-bookworm" (two stacked suffixes, a real, common pattern —
+    e.g. Python's own official images) won't match and stays excluded,
+    same as before this function existed. That's a coverage gap, not a
+    correctness risk — this module prefers under-matching over
+    over-matching throughout (see module docstring), and extending this
+    to strip multiple stacked suffixes wasn't needed for any confirmed
+    real case yet.
+    """
+    prefix, sep, suffix = tag.rpartition("-")
+    if not sep or suffix.lower() not in KNOWN_BASE_IMAGE_SUFFIXES:
+        return None
+    try:
+        Version(prefix)
+    except InvalidVersion:
+        return None
+    return prefix
+
+
 def rank_final_versions(tags: list[str]) -> list[str]:
     """Final-release candidates only (dev releases and pre-releases both
     excluded — see select_newest_version_tag()'s docstring for why),
@@ -162,7 +230,13 @@ def rank_final_versions(tags: list[str]) -> list[str]:
     lexicographic — 2.9.10 correctly sorts ahead of 2.9.9. A tag that
     doesn't parse as a version at all (InvalidVersion) is silently
     skipped, not treated as an error: expected for some tag lists even
-    after filter_tags().
+    after filter_tags() — *unless* it's `<version>-<known base-image
+    suffix>` (e.g. "2.1.2-alpine"), in which case the version prefix is
+    used for ranking instead (see _strip_known_base_image_suffix()) —
+    the *original* tag string is still what's returned, never a
+    synthesized bare version, since that string is what a caller needs
+    to actually look the tag up on the registry (see REGISTRY_TAG_WALK_SPEC.md's
+    base-image-suffix amendment).
 
     Tie-break for tags that compare as the exact same Version (e.g. "2.9"
     and "2.9.0" — packaging.version.Version("2.9") == Version("2.9.0"),
@@ -190,8 +264,19 @@ def rank_final_versions(tags: list[str]) -> list[str]:
         try:
             version = Version(t)
         except InvalidVersion:
-            _LOGGER.debug("rank_final_versions: %r doesn't parse as a version, skipping", t)
-            continue
+            stripped = _strip_known_base_image_suffix(t)
+            if stripped is None:
+                _LOGGER.debug("rank_final_versions: %r doesn't parse as a version, skipping", t)
+                continue
+            version = Version(stripped)
+            _LOGGER.debug(
+                "rank_final_versions: %r doesn't parse directly, but stripping its known "
+                "base-image suffix gives %r, which does — ranking %r as %s",
+                t,
+                stripped,
+                t,
+                version,
+            )
         if version.is_devrelease:
             _LOGGER.debug(
                 "rank_final_versions: %r is a dev release, excluding from consideration", t

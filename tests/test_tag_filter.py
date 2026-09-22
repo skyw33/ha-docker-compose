@@ -1,4 +1,6 @@
 from ha_docker_compose.tag_filter import (
+    KNOWN_BASE_IMAGE_SUFFIXES,
+    _strip_known_base_image_suffix,
     filter_tags,
     is_not_behind,
     is_real_version_tag,
@@ -259,3 +261,95 @@ def test_select_newest_version_tag_matches_rank_final_versions_head() -> None:
     REGISTRY_TAG_WALK_SPEC.md's tie-break consistency requirement)."""
     tags = ["2.9.9", "2.9.10", "2.9.2", "3.0.0b1", "3.1.0-dev1"]
     assert select_newest_version_tag(tags) == rank_final_versions(tags)[0]
+
+
+# --- _strip_known_base_image_suffix / base-image-suffix ranking ------------
+
+
+def test_strip_known_base_image_suffix_alpine() -> None:
+    assert _strip_known_base_image_suffix("2.1.2-alpine") == "2.1.2"
+
+
+def test_strip_known_base_image_suffix_case_insensitive() -> None:
+    assert _strip_known_base_image_suffix("2.1.2-Alpine") == "2.1.2"
+    assert _strip_known_base_image_suffix("2.1.2-ALPINE") == "2.1.2"
+
+
+def test_strip_known_base_image_suffix_none_for_unknown_word() -> None:
+    """The whole point: only a curated list of real distro/base-image
+    identifiers, not "any word Version() doesn't recognize" — confirmed
+    real risk this guards against: eclipse-mosquitto-shaped repos could
+    just as easily publish a "-nightly" or "-snapshot" tag, which must
+    never be treated as a clean final release."""
+    assert _strip_known_base_image_suffix("2.2.0-nightly") is None
+    assert _strip_known_base_image_suffix("2.2.0-snapshot") is None
+    assert _strip_known_base_image_suffix("2.2.0-unstable") is None
+
+
+def test_strip_known_base_image_suffix_none_when_prefix_itself_invalid() -> None:
+    assert _strip_known_base_image_suffix("not-a-version-alpine") is None
+
+
+def test_strip_known_base_image_suffix_none_for_recognized_prerelease_keyword() -> None:
+    """A real pre-release tag must never be treated as strippable — it
+    already parses correctly (as a pre-release, excluded from final
+    ranking on its own terms), so this function is never even reached
+    for it inside rank_final_versions()'s try/except; this test locks in
+    that none of the curated words collide with packaging's own
+    pre/post/dev-release keywords, so that invariant can't quietly break
+    if the allowlist is ever extended."""
+    prerelease_keywords = {"alpha", "a", "beta", "b", "preview", "pre", "c", "rc", "post", "rev", "r", "dev"}
+    assert KNOWN_BASE_IMAGE_SUFFIXES.isdisjoint(prerelease_keywords)
+
+
+def test_strip_known_base_image_suffix_none_for_multiple_stacked_suffixes() -> None:
+    """Documented coverage gap, not a correctness risk (this module
+    prefers under- over over-matching throughout) — see the function's
+    own docstring."""
+    assert _strip_known_base_image_suffix("3.12-slim-bookworm") is None
+
+
+def test_strip_known_base_image_suffix_none_for_tag_with_no_suffix() -> None:
+    assert _strip_known_base_image_suffix("2.1.2") is None
+
+
+def test_rank_final_versions_promotes_base_image_suffixed_tag() -> None:
+    """The confirmed real case: eclipse-mosquitto's 2.1.x line is only
+    ever published as "<version>-alpine" — no bare tag exists at all.
+    The *original* tag string must be what's returned, never a
+    synthesized bare version — a caller needs the real, pullable tag
+    name to look it up on the registry."""
+    tags = ["2.0.22", "2.0.21", "2.1.2-alpine", "2.1.1-alpine", "2.1.0-alpine"]
+    assert rank_final_versions(tags)[0] == "2.1.2-alpine"
+    assert select_newest_version_tag(tags) == "2.1.2-alpine"
+
+
+def test_rank_final_versions_does_not_promote_nightly_suffixed_tag() -> None:
+    """The false-positive case this whole design exists to avoid: a
+    "-nightly"-suffixed tag must never be promoted to "latest final
+    release", even though it would fail direct Version() parsing the
+    same way a real base-image-suffixed tag does."""
+    tags = ["2.0.22", "2.1.0", "2.2.0-nightly"]
+    assert "2.2.0-nightly" not in rank_final_versions(tags)
+    assert select_newest_version_tag(tags) == "2.1.0"
+
+
+def test_rank_final_versions_mosquitto_real_world_tag_shape() -> None:
+    """End-to-end against the real, confirmed-live eclipse-mosquitto
+    shape (older lines: bare + "-openssl" variant of the same version;
+    2.1.x line: "-alpine" only, no bare tag) — proves the fix resolves
+    the actually-reported symptom (latest_registry_tag showing 2.0.22
+    instead of 2.1.2), not just the isolated helper function."""
+    tags = [
+        "2.0.22",
+        "2.0.22-openssl",
+        "2.0.21",
+        "2.0.21-openssl",
+        "2.1.2-alpine",
+        "2.1.1-alpine",
+        "2.1.0-alpine",
+        "2.1-alpine",
+        "latest",
+        "alpine",
+    ]
+    assert select_newest_version_tag(tags) == "2.1.2-alpine"

@@ -101,26 +101,41 @@ def detect_version(
     *,
     stack_name: str = "",
     service_name: str = "",
+    verified_current_version: str | None = None,
     assumed_version: str | None = None,
 ) -> str | None:
-    """Fallback chain, checked in order: the OCI version label (image
-    first, then the container's own labels as a fallback for a
-    user-supplied compose `labels:` override — same resolution order as
-    the GitHub source-label lookup, see oci_labels.py), then the image tag
-    itself if it looks like a real version, then — strictly last resort,
-    and only if every check above returns nothing — assumed_version, a
-    persisted snapshot of latest_registry_tag from the moment of the most
-    recent successful pull (caller-supplied; this function has no I/O of
-    its own — see UNVERIFIED_DETECTED_VERSION_SPEC.md and
-    pull_jobs.py/storage.py). That last fallback is deliberately marked
-    with UNVERIFIED_SUFFIX in the returned value, since — unlike every
-    other source in this chain — it's an assumption (pulling a floating
-    tag usually, by convention, lands on the same build as the newest
-    published tag, but this is never proven the way a real pin or a
-    digest match would be), not a verified fact, and must never be
-    mistaken for one. Returns None (never raises) if nothing at all is
-    available — that's the expected outcome for most images on a floating
-    tag with no version label and no prior pull, not an error.
+    """Fallback chain, checked in order:
+
+    1. The OCI version label (image first, then the container's own
+       labels as a fallback for a user-supplied compose `labels:`
+       override — same resolution order as the GitHub source-label
+       lookup, see oci_labels.py).
+    2. The image tag itself, if it looks like a real version.
+    3. `verified_current_version` (caller-supplied; this function still
+       has no I/O of its own) — a live match found by cross-referencing
+       the registry's own tags against the running image's digest (see
+       TagWalkCoordinator.ServiceTagWalkStatus.verified_current_version
+       and UNVERIFIED_DETECTED_VERSION_SPEC.md's verified-current-version
+       amendment). This is what makes a floating tag (stable, latest,
+       edge, ...) resolve to a real version at all when neither the
+       label nor the tag itself has one to parse — returned verbatim, no
+       UNVERIFIED_SUFFIX, since a digest match is a proven fact, not an
+       assumption, exactly like a real pin would be.
+    4. Strictly last resort, and only if every check above returns
+       nothing — `assumed_version`, a persisted snapshot of
+       `latest_registry_tag` from the moment of the most recent
+       successful pull (see pull_jobs.py/storage.py). Deliberately
+       weaker than step 3 and checked after it: an assumption (pulling a
+       floating tag usually, by convention, lands on the same build as
+       the newest published tag, but this was never proven the way a
+       digest match is) rather than a verified fact, and marked with
+       UNVERIFIED_SUFFIX in the returned value so it's never mistaken
+       for one.
+
+    Returns None (never raises) if nothing at all is available — that's
+    the expected outcome for some images on a floating tag with no
+    version label, no matching registry tag, and no prior pull, not an
+    error.
     """
     label_value, origin = resolve_label(image_labels, container_labels, OCI_VERSION_LABEL)
     if label_value and has_version_structure(label_value):
@@ -167,6 +182,19 @@ def detect_version(
         )
         return detected
 
+    if verified_current_version:
+        _LOGGER.debug(
+            "detect_version(%s/%s): no '%s' label and tag '%s' doesn't look like a version — "
+            "using verified_current_version %r (a live registry-tag/digest cross-reference, "
+            "not an assumption)",
+            stack_name,
+            service_name,
+            OCI_VERSION_LABEL,
+            image_tag,
+            verified_current_version,
+        )
+        return verified_current_version
+
     if assumed_version:
         _LOGGER.debug(
             "detect_version(%s/%s): no '%s' label and tag '%s' doesn't look like a version — "
@@ -181,9 +209,9 @@ def detect_version(
         return f"{assumed_version}{UNVERIFIED_SUFFIX}"
 
     _LOGGER.debug(
-        "detect_version(%s/%s): no '%s' label, tag '%s' doesn't look like a version, and no "
-        "assumed_version from a prior pull either — nothing to show (expected/normal, not an "
-        "error)",
+        "detect_version(%s/%s): no '%s' label, tag '%s' doesn't look like a version, no "
+        "verified_current_version match, and no assumed_version from a prior pull either — "
+        "nothing to show (expected/normal, not an error)",
         stack_name,
         service_name,
         OCI_VERSION_LABEL,

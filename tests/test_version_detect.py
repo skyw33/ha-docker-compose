@@ -118,6 +118,70 @@ def test_detect_version_real_version_label_still_wins() -> None:
     assert result == "4.2.0"
 
 
+def test_detect_version_uses_verified_current_version_when_no_label_or_tag() -> None:
+    """Confirmed real case: ghcr.io/blakeblackshear/frigate:stable — empty
+    image labels (verified directly against the registry, not assumed),
+    a floating tag with nothing to parse. verified_current_version (a
+    live digest cross-reference computed by TagWalkCoordinator) is the
+    only remaining source, and — unlike assumed_version — is returned
+    verbatim, no unverified suffix."""
+    result = detect_version(
+        "ghcr.io/blakeblackshear/frigate:stable",
+        image_labels={},
+        container_labels=None,
+        verified_current_version="0.18.0",
+    )
+    assert result == "0.18.0"
+
+
+def test_detect_version_verified_current_version_never_overrides_real_label() -> None:
+    result = detect_version(
+        "grocy/backend:v4.2.0",
+        image_labels={"org.opencontainers.image.version": "4.2.0"},
+        container_labels=None,
+        verified_current_version="9.9.9",
+    )
+    assert result == "4.2.0"
+
+
+def test_detect_version_verified_current_version_never_overrides_real_tag() -> None:
+    result = detect_version(
+        "someimage:v4.2.0",
+        image_labels={},
+        container_labels=None,
+        verified_current_version="9.9.9",
+    )
+    assert result == "4.2.0"
+
+
+def test_detect_version_verified_current_version_wins_over_assumed_version() -> None:
+    """A live digest match outranks the old, stale, unverified
+    last-pull snapshot — this is the priority ordering the whole feature
+    is for: a verified fact should never lose to an assumption just
+    because the assumption happened to be checked first historically."""
+    result = detect_version(
+        "ghcr.io/blakeblackshear/frigate:stable",
+        image_labels={},
+        container_labels=None,
+        verified_current_version="0.18.0",
+        assumed_version="0.17.0",
+    )
+    assert result == "0.18.0"
+
+
+def test_detect_version_empty_verified_current_version_falls_through() -> None:
+    """An empty string (falsy) must fall through to assumed_version, not
+    be returned as-is or block the chain."""
+    result = detect_version(
+        "someimage:latest",
+        image_labels={},
+        container_labels=None,
+        verified_current_version="",
+        assumed_version="v0.3.0",
+    )
+    assert result == "v0.3.0" + UNVERIFIED_SUFFIX
+
+
 def test_detect_version_falls_back_to_assumed_version_when_nothing_else_available() -> None:
     """Confirmed real case: otbr — no OCI label, floating tag pin. The
     persisted assumed_version (from the last successful pull's

@@ -217,6 +217,20 @@ def test_rank_final_versions_all_excluded_returns_empty() -> None:
     assert rank_final_versions(["1.0.0b1", "1.0.0.dev1"]) == []
 
 
+def test_rank_final_versions_tie_break_prefers_more_specific_regardless_of_input_order() -> None:
+    """"2.9" and "2.9.0" compare as the exact same Version (packaging pads
+    the shorter release tuple with zeros) — the more complete/specific
+    form must win deterministically, not depend on which one the
+    registry happened to list first."""
+    assert rank_final_versions(["2.9", "2.9.0"])[0] == "2.9.0"
+    assert rank_final_versions(["2.9.0", "2.9"])[0] == "2.9.0"
+
+
+def test_rank_final_versions_tie_break_never_beats_a_real_newer_version() -> None:
+    tags = ["2.10", "2.9.0", "2.9"]
+    assert rank_final_versions(tags) == ["2.10", "2.9.0", "2.9"]
+
+
 def test_select_newest_version_tag_matches_rank_final_versions_head() -> None:
     """select_newest_version_tag() must always agree with
     rank_final_versions()[0] — they're required to share one ranking

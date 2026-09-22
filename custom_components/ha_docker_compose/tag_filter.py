@@ -164,12 +164,26 @@ def rank_final_versions(tags: list[str]) -> list[str]:
     skipped, not treated as an error: expected for some tag lists even
     after filter_tags().
 
+    Tie-break for tags that compare as the exact same Version (e.g. "2.9"
+    and "2.9.0" — packaging.version.Version("2.9") == Version("2.9.0"),
+    confirmed: release-segment comparison pads the shorter tuple with
+    zeros, so these are equal, not just close): the tag with more
+    dot-separated release segments wins — "2.9.0" over "2.9" — since it's
+    the more specific/complete form. Without this, a plain sort is
+    stable, so the winner would silently depend on the registry's own
+    tag-list ordering (confirmed by direct test: swapping the input order
+    of two Version-equal tags changed which one sorted first). This only
+    ever breaks ties between tags that are already equal as real
+    versions; it never lets a less-specific tag outrank a genuinely newer
+    one (2.10 still beats 2.9.0 regardless of segment count).
+
     The single ranking rule shared by select_newest_version_tag() (takes
     just the top result) and tag_walk_coordinator.py's pull-target-version
-    search (takes the top N for a bounded digest-lookup search, per
-    REGISTRY_TAG_WALK_SPEC.md's "Cost consideration" — reusing this
-    function is the "consistent behavior already established" tie-break
-    the spec asks for, rather than a second hand-rolled rule).
+    and verified-current-version searches (each takes the top N for a
+    bounded digest-lookup search, per REGISTRY_TAG_WALK_SPEC.md's "Cost
+    consideration" — reusing this function is the "consistent behavior
+    already established" tie-break the spec asks for, rather than a
+    second hand-rolled rule).
     """
     finals: list[tuple[Version, str]] = []
     for t in tags:
@@ -190,7 +204,10 @@ def rank_final_versions(tags: list[str]) -> list[str]:
             continue
         finals.append((version, t))
 
-    finals.sort(key=lambda pair: pair[0], reverse=True)
+    # (version, segment count) — reverse=True descends both, so among
+    # Version-equal tags the one with more release segments (more
+    # specific) sorts first. See docstring above.
+    finals.sort(key=lambda pair: (pair[0], len(pair[0].release)), reverse=True)
     return [t for _, t in finals]
 
 

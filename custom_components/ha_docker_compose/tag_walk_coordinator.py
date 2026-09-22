@@ -59,7 +59,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import STACK_STATE_RUNNING
@@ -129,6 +128,7 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         hass: HomeAssistant,
         stacks_coordinator: StacksCoordinator,
         update_coordinator: UpdateCheckCoordinator,
+        registry_client: RegistryClient,
         label: str,
         update_interval: timedelta = DEFAULT_TAG_WALK_INTERVAL,
     ) -> None:
@@ -143,7 +143,11 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         )
         self._stacks_coordinator = stacks_coordinator
         self._update_coordinator = update_coordinator
-        self._registry_client = RegistryClient(async_get_clientsession(hass))
+        # Shared, not constructed here — see the identical note on
+        # UpdateCheckCoordinator.__init__ (update_coordinator.py): one
+        # RegistryClient per config entry, passed to both coordinators, so
+        # its concurrency limit actually bounds both sweeps together.
+        self._registry_client = registry_client
         # (stack_name, service_name) pairs already logged for a standing
         # (non-transient) condition, so we warn once instead of every poll.
         self._warned_unsupported: set[tuple[str, str]] = set()

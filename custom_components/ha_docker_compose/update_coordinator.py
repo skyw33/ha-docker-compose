@@ -61,7 +61,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import STACK_STATE_RUNNING
@@ -143,6 +142,7 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
         engine: DockerEngineClient,
         stacks_coordinator: StacksCoordinator,
         digest_history: DigestHistoryStore,
+        registry_client: RegistryClient,
         label: str,
         update_interval: timedelta = DEFAULT_UPDATE_CHECK_INTERVAL,
     ) -> None:
@@ -158,7 +158,16 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
         self._engine = engine
         self._stacks_coordinator = stacks_coordinator
         self._digest_history = digest_history
-        self._registry_client = RegistryClient(async_get_clientsession(hass))
+        # Shared, not constructed here — one RegistryClient per config
+        # entry, passed to both this coordinator and TagWalkCoordinator
+        # (see __init__.py), so its per-registry concurrency limit
+        # (MAX_CONCURRENT_REQUESTS_PER_REGISTRY) actually bounds the two
+        # coordinators' independently-scheduled sweeps together, not just
+        # each in isolation — two unrelated schedules bursting past each
+        # other with no shared limit is exactly the confirmed failure
+        # mode (simultaneous 429s across several stacks during a
+        # Reload-triggered sweep). See registry_client.py.
+        self._registry_client = registry_client
         # (stack_name, service_name) pairs already logged for a standing
         # (non-transient) condition, so we warn once instead of every poll.
         self._warned_unsupported: set[tuple[str, str]] = set()

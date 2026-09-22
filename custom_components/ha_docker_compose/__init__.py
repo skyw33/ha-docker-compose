@@ -14,6 +14,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .compose import ComposeExecutor
 from .const import (
@@ -32,6 +33,7 @@ from .discovery import StackInfo, discover_stacks
 from .engine import DockerEngineClient
 from .github_coordinator import GitHubReleaseCoordinator
 from .pull_jobs import PullJobRunner, PullJobStore
+from .registry_client import RegistryClient
 from .site_identity import other_site_slugs, resolve_unique_site_slug, slugify_site_name
 from .storage import DigestHistoryStore
 from .tag_walk_coordinator import TagWalkCoordinator
@@ -100,8 +102,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     digest_history = DigestHistoryStore(hass, entry.entry_id)
     await digest_history.async_load()
 
+    # One RegistryClient for this whole entry, shared by both
+    # UpdateCheckCoordinator and TagWalkCoordinator below (constructed
+    # once, passed by reference — same pattern already used for
+    # `coordinator` itself across every coordinator in this file) rather
+    # than each building its own. This is what makes the client's
+    # per-registry concurrency limit actually bound both coordinators'
+    # independently-scheduled sweeps together: a confirmed real failure
+    # was simultaneous HTTP 429s across several stacks' manifest lookups
+    # during one Reload-triggered sweep — two unrelated schedules
+    # bursting past each other with no shared limit. See
+    # registry_client.py's MAX_CONCURRENT_REQUESTS_PER_REGISTRY.
+    registry_client = RegistryClient(async_get_clientsession(hass))
+
     update_coordinator = UpdateCheckCoordinator(
-        hass, engine, coordinator, digest_history, coordinator_label
+        hass, engine, coordinator, digest_history, registry_client, coordinator_label
     )
     await update_coordinator.async_config_entry_first_refresh()
 
@@ -112,7 +127,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # already exist. See tag_walk_coordinator.py and
     # REGISTRY_TAG_WALK_SPEC.md's "Prerequisite" amendment.
     tag_walk_coordinator = TagWalkCoordinator(
-        hass, coordinator, update_coordinator, coordinator_label
+        hass, coordinator, update_coordinator, registry_client, coordinator_label
     )
     await tag_walk_coordinator.async_config_entry_first_refresh()
 

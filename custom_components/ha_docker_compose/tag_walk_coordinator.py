@@ -71,6 +71,7 @@ from .tag_filter import (
     TAG_EXCLUDE_LABEL,
     TAG_INCLUDE_LABEL,
     filter_tags,
+    is_not_behind,
     rank_final_versions,
     select_newest_version_tag,
 )
@@ -104,6 +105,20 @@ PULL_TARGET_MAX_DIGEST_LOOKUPS = 15
 class ServiceTagWalkStatus:
     latest_registry_tag: str | None = None
     pull_target_version: str | None = None
+    # Which candidate tag, if any, shares the *locally running* image's
+    # digest right now — i.e. a live, verified answer to "what version is
+    # actually running", for a service pinned to a floating tag (stable,
+    # latest, edge, ...) where the tag itself carries no version
+    # information to parse. Reuses pull_target_version's own search
+    # result at zero extra cost whenever the service isn't behind (local
+    # digest == the pinned tag's remote digest, so the same match
+    # answers both questions); only runs its own bounded second search
+    # when the service is behind. See
+    # UNVERIFIED_DETECTED_VERSION_SPEC.md's verified-current-version
+    # amendment — distinct from (and preferred over) detect_version()'s
+    # own assumed_version fallback, which is a stale, unverified snapshot
+    # from the last pull rather than a live digest match.
+    verified_current_version: str | None = None
 
 
 class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWalkStatus]]]):
@@ -245,14 +260,16 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
                 continue
 
             pinned_digest = None
+            local_digest = None
             if digest_summary is not None:
                 digest_status = digest_summary.services.get(service_name)
                 if digest_status is not None:
                     pinned_digest = digest_status.remote_digest
+                    local_digest = digest_status.local_digest
 
             previous = previous_services.get(service_name) if previous_services else None
             services[service_name] = await self._check_one(
-                stack_name, service_name, service_def, image_ref, pinned_digest, previous
+                stack_name, service_name, service_def, image_ref, pinned_digest, local_digest, previous
             )
 
         return services
@@ -264,6 +281,7 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         service_def: dict,
         image_ref: str,
         pinned_digest: str | None,
+        local_digest: str | None,
         previous: ServiceTagWalkStatus | None,
     ) -> ServiceTagWalkStatus:
         service_key = (stack_name, service_name)
@@ -334,51 +352,95 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         )
 
         latest_registry_tag = select_newest_version_tag(candidates)
+        # Shared by both digest searches below — computed once, not once
+        # per search, since it's the same bounded candidate set either way
+        # (see PULL_TARGET_MAX_DIGEST_LOOKUPS and rank_final_versions()'s
+        # own tie-break for why this ordering is deterministic).
+        ranked = rank_final_versions(candidates)[:PULL_TARGET_MAX_DIGEST_LOOKUPS]
 
         pull_target_version = None
         if pinned_digest:
-            pull_target_version = await self._find_pull_target_version(
-                stack_name, service_name, image_ref, candidates, pinned_digest
+            pull_target_version = await self._search_ranked_for_digest(
+                stack_name, service_name, image_ref, ranked, pinned_digest, "pull_target_version"
             )
+
+        verified_current_version = None
+        if local_digest:
+            if is_not_behind(pinned_digest, local_digest):
+                # Not behind: the search above already answered "which
+                # candidate has this exact digest" using the same target
+                # value (local_digest == pinned_digest here), so its
+                # result is the current version too — reusing it costs
+                # zero extra registry calls. Re-running the same search
+                # against the same target digest would just repeat the
+                # same lookups for the same answer.
+                verified_current_version = pull_target_version
+            else:
+                # Behind (or no digest check has run yet to compare
+                # against) — a genuinely different target digest needs
+                # its own search, reusing the same already-fetched/ranked
+                # candidate list.
+                verified_current_version = await self._search_ranked_for_digest(
+                    stack_name,
+                    service_name,
+                    image_ref,
+                    ranked,
+                    local_digest,
+                    "verified_current_version",
+                )
 
         _LOGGER.debug(
             "Tag walk for %s (stack %s, service %s): latest_registry_tag=%r, "
-            "pull_target_version=%r (pinned_digest=%r)",
+            "pull_target_version=%r (pinned_digest=%r), verified_current_version=%r "
+            "(local_digest=%r)",
             image_ref,
             stack_name,
             service_name,
             latest_registry_tag,
             pull_target_version,
             pinned_digest,
+            verified_current_version,
+            local_digest,
         )
 
         return ServiceTagWalkStatus(
-            latest_registry_tag=latest_registry_tag, pull_target_version=pull_target_version
+            latest_registry_tag=latest_registry_tag,
+            pull_target_version=pull_target_version,
+            verified_current_version=verified_current_version,
         )
 
-    async def _find_pull_target_version(
+    async def _search_ranked_for_digest(
         self,
         stack_name: str,
         service_name: str,
         image_ref: str,
-        candidates: list[str],
-        pinned_digest: str,
+        ranked: list[str],
+        target_digest: str,
+        purpose: str,
     ) -> str | None:
-        """Which candidate tag, if any, currently shares pinned_digest —
-        the version you'd actually end up running if you pulled right
-        now. Searches newest-first (rank_final_versions(), the same
-        ranking select_newest_version_tag() itself uses — the "consistent
-        behavior already established" the spec asks for if more than one
-        candidate happens to share the digest, since the first match
-        found in this order is always the newest one), bounded to
-        PULL_TARGET_MAX_DIGEST_LOOKUPS to avoid digest-checking a
-        project's entire historical tag list. Returns None (never
-        guesses) if nothing matches within that bounded search — expected
-        for some projects (e.g. pinned to a tag whose current build has
-        no corresponding numbered version tag at all).
+        """Which candidate tag, if any, currently shares target_digest —
+        shared by both pull_target_version's search (target_digest =
+        the pinned tag's remote digest — "what you'd get if you pulled
+        right now") and verified_current_version's own second search
+        (target_digest = local_digest — "what's actually running right
+        now"), so this manifest-lookup loop and its error handling exist
+        in exactly one place rather than two copies drifting apart.
+
+        `ranked` is expected to already be rank_final_versions()'d and
+        bounded (PULL_TARGET_MAX_DIGEST_LOOKUPS) by the caller — this
+        method doesn't re-rank, since both callers in _check_one() need
+        the identical bounded list and there's no reason to compute it
+        twice. Searches in the order given (newest-first, per
+        rank_final_versions()'s own tie-break, so the first match found
+        is always the newest/most-specific one if more than one
+        candidate happens to share the digest). Returns None (never
+        guesses) if nothing matches within the given list — expected for
+        some projects (e.g. pinned to a tag whose current build has no
+        corresponding numbered version tag at all). `purpose` is only
+        for the per-candidate-failure debug log below, to tell the two
+        callers' log lines apart.
         """
         repo = repo_name(image_ref)
-        ranked = rank_final_versions(candidates)[:PULL_TARGET_MAX_DIGEST_LOOKUPS]
 
         for tag in ranked:
             candidate_ref = f"{repo}:{tag}"
@@ -389,8 +451,9 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
                 # the registry rejects) must not abort the whole search —
                 # just move on to the next candidate.
                 _LOGGER.debug(
-                    "pull_target_version search for %s (stack %s, service %s): manifest lookup "
-                    "for candidate %r failed, skipping: %s",
+                    "%s search for %s (stack %s, service %s): manifest lookup for candidate "
+                    "%r failed, skipping: %s",
+                    purpose,
                     image_ref,
                     stack_name,
                     service_name,
@@ -398,7 +461,7 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
                     err,
                 )
                 continue
-            if digest == pinned_digest:
+            if digest == target_digest:
                 return tag
 
         return None

@@ -1,5 +1,6 @@
 from ha_docker_compose.tag_filter import (
     filter_tags,
+    is_not_behind,
     is_real_version_tag,
     rank_final_versions,
     select_newest_version_tag,
@@ -229,6 +230,26 @@ def test_rank_final_versions_tie_break_prefers_more_specific_regardless_of_input
 def test_rank_final_versions_tie_break_never_beats_a_real_newer_version() -> None:
     tags = ["2.10", "2.9.0", "2.9"]
     assert rank_final_versions(tags) == ["2.10", "2.9.0", "2.9"]
+
+
+def test_is_not_behind_true_when_digests_match() -> None:
+    assert is_not_behind("sha256:aaa", "sha256:aaa") is True
+
+
+def test_is_not_behind_false_when_digests_differ() -> None:
+    assert is_not_behind("sha256:aaa", "sha256:bbb") is False
+
+
+def test_is_not_behind_false_when_pinned_digest_missing() -> None:
+    assert is_not_behind(None, "sha256:aaa") is False
+
+
+def test_is_not_behind_false_when_local_digest_missing() -> None:
+    assert is_not_behind("sha256:aaa", None) is False
+
+
+def test_is_not_behind_false_when_both_missing() -> None:
+    assert is_not_behind(None, None) is False
 
 
 def test_select_newest_version_tag_matches_rank_final_versions_head() -> None:

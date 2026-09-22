@@ -233,3 +233,21 @@ def select_newest_version_tag(tags: list[str]) -> str | None:
     """
     ranked = rank_final_versions(tags)
     return ranked[0] if ranked else None
+
+
+def is_not_behind(pinned_digest: str | None, local_digest: str | None) -> bool:
+    """True only if both digests are known and identical — i.e. the
+    running container's local image already matches what the pinned
+    (possibly floating) tag currently resolves to on the registry.
+
+    Used by tag_walk_coordinator.py to decide whether
+    pull_target_version's own digest search can be reused as
+    verified_current_version's answer too (same target digest, so the
+    same match), instead of paying for a second bounded search against
+    local_digest. Either digest missing (no digest check has completed
+    yet) is treated as "can't tell, don't assume not-behind" — False,
+    not an exception — so the caller falls through to its own search
+    rather than wrongly reusing a result that was never actually
+    verified against local_digest.
+    """
+    return bool(pinned_digest) and bool(local_digest) and pinned_digest == local_digest

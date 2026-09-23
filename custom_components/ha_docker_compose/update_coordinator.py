@@ -36,12 +36,17 @@ on its original fast/hourly cadence, since freshness genuinely matters for
 coordinator's remote_digest for its own pull_target_version correlation,
 rather than duplicating the digest lookup.
 
-Also tracks each service's update_available state across cycles
-(`_known_on_services`, in-memory only — same category of state as
-coordinator.py's `pulling_stacks`, doesn't need to survive a restart) and
-fires a scoped TagWalkCoordinator refresh the moment a service
-transitions off→on — see PULL_TARGET_VERSION_SPEC.md's
-update_available-transition amendment. That's the one moment
+Also fires a scoped TagWalkCoordinator refresh the moment a service's
+(local_digest, remote_digest) pair actually changes from one cycle to the
+next (compared against the previous cycle's own ServiceUpdateStatus,
+already carried forward in `self.data` — no separate tracking state
+needed) — see PULL_TARGET_VERSION_SPEC.md's update_available-transition
+amendment, broadened by REGISTRY_TAG_WALK_SPEC.md's any-digest-transition
+amendment to cover any change to either digest, not just the specific
+case of update_available flipping off→on (which doesn't cover, for
+example, an update resolving on→off, or local_digest jumping straight
+from unknown to a value that already matches remote_digest — confirmed
+real case, see that amendment). That's the moment
 latest_registry_tag/pull_target_version actually become newly relevant,
 and TagWalkCoordinator's own scheduled sweep (every 48h as of that
 amendment) is too slow to catch it promptly on its own. Decoupled from a
@@ -172,18 +177,6 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
         # (non-transient) condition, so we warn once instead of every poll.
         self._warned_unsupported: set[tuple[str, str]] = set()
         self._warned_auth_denied: set[tuple[str, str]] = set()
-        # Services this coordinator currently believes have an update
-        # pending, as of the last cycle that computed a value for them —
-        # in-memory only, never persisted, a restart naturally clears it
-        # (same category of state as coordinator.py's pulling_stacks).
-        # Membership (not a three-state dict) is enough to distinguish
-        # every case that matters: a key absent here means "not known
-        # on" — covers both "confirmed off/None last cycle" AND "never
-        # computed before" identically, which is exactly what makes a
-        # service's very first computation coming back True correctly
-        # count as a transition (see _async_update_data()) without any
-        # separate "have we seen this service before" bookkeeping.
-        self._known_on_services: set[tuple[str, str]] = set()
         self._transition_callback: TransitionCallback | None = None
 
     @property
@@ -205,11 +198,30 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
         result: dict[str, StackUpdateSummary] = {}
         stack_statuses = self._stacks_coordinator.data or {}
         previous_data = self.data or {}
-        # Stacks with at least one service that transitioned off→on (or
-        # had its first-ever computation come back on) this cycle — see
+        # Stacks with at least one service whose (local_digest,
+        # remote_digest) pair actually changed this cycle — see
         # PULL_TARGET_VERSION_SPEC.md's update_available-transition
-        # amendment. A set, not a list: multiple transitioning services
-        # in the same stack only need that stack refreshed once.
+        # amendment, broadened by REGISTRY_TAG_WALK_SPEC.md's
+        # any-digest-transition amendment: any change to either digest is
+        # exactly the condition under which TagWalkCoordinator's cached
+        # pull_target_version/verified_current_version could now be
+        # stale, not just the specific case where update_available flips
+        # off→on. Comparing the digest pair directly (rather than the
+        # derived update_available boolean) also catches a confirmed real
+        # gap the boolean-only check missed entirely: local_digest jumping
+        # straight from unknown to a value that already matches
+        # remote_digest — update_available goes None→False, never True,
+        # so the old off→on-only check never fired for it. A set, not a
+        # list: multiple transitioning services in the same stack only
+        # need that stack refreshed once. A service with no previous
+        # cycle at all (previous is None) always counts as "changed" too
+        # (None != any real tuple) — same as the old logic's deliberate
+        # treatment of a service's first-ever computation, and equally
+        # harmless here: the transition callback is only wired up (see
+        # set_transition_callback()) after this coordinator's own first
+        # refresh already ran once, so this can only ever fire for a
+        # service genuinely new since the last cycle, not a startup burst
+        # across every service.
         transitioned_stacks: set[str] = set()
 
         for stack_name, status in stack_statuses.items():
@@ -229,14 +241,10 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
                 )
                 services[service_name] = service_status
 
-                service_key = (stack_name, service_name)
-                is_on_now = service_status.update_available is True
-                if is_on_now:
-                    if service_key not in self._known_on_services:
-                        transitioned_stacks.add(stack_name)
-                    self._known_on_services.add(service_key)
-                else:
-                    self._known_on_services.discard(service_key)
+                previous_digests = (previous.local_digest, previous.remote_digest) if previous else None
+                current_digests = (service_status.local_digest, service_status.remote_digest)
+                if current_digests != previous_digests:
+                    transitioned_stacks.add(stack_name)
 
             if services:
                 result[stack_name] = StackUpdateSummary(
@@ -251,8 +259,8 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
     def _fire_transition_callback(self, transitioned_stacks: set[str]) -> None:
         if self._transition_callback is None:
             _LOGGER.debug(
-                "update_available transitioned off→on for %s, but no transition callback is "
-                "wired up yet — nothing to trigger",
+                "Digest(s) changed for %s, but no transition callback is wired up yet — "
+                "nothing to trigger",
                 sorted(transitioned_stacks),
             )
             return
@@ -284,11 +292,28 @@ class UpdateCheckCoordinator(DataUpdateCoordinator[dict[str, StackUpdateSummary]
         image_ref: str,
         previous: ServiceUpdateStatus | None,
     ) -> ServiceUpdateStatus:
+        # Default to the last known local digest; a transient failure below
+        # leaves it as-is instead of resetting to None — same treatment as
+        # remote_digest just below, for the same reason: this
+        # coordinator's own flap-resistance guarantee for update_available
+        # (a blip shouldn't cause a spurious off→on→off), and, since this
+        # session's REGISTRY_TAG_WALK_SPEC.md any-digest-transition
+        # amendment, TagWalkCoordinator's out-of-cycle trigger too — a
+        # local_digest that flaps None-then-back-to-the-same-value on a
+        # transient engine hiccup would otherwise register as two spurious
+        # digest-pair "changes" in _async_update_data(), firing a scoped
+        # tag-walk refresh for nothing. Note this exception only ever
+        # fires for a genuinely unexpected failure (e.g. a Docker-socket-
+        # level error) — "image not found locally" is already handled
+        # inside get_image_repo_digest()/_inspect_image() (engine.py),
+        # which catches DockerError internally and returns None without
+        # raising, so that case never reaches here and isn't masked by
+        # this keep-previous default.
+        local_digest = previous.local_digest if previous else None
         try:
             local_digest = await self._engine.get_image_repo_digest(image_ref)
         except Exception:  # noqa: BLE001 - one bad image must not abort the whole check
             _LOGGER.exception("Local digest lookup failed for %s/%s", stack_name, service_name)
-            local_digest = None
 
         service_key = (stack_name, service_name)
         registry_supported = True

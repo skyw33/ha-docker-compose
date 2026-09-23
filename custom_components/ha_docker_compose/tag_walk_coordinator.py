@@ -10,6 +10,14 @@ update_coordinator.py's own, much faster cadence):
   shares the exact same digest as the service's own pinned tag right now
   (i.e. "if I pull right now, what version would I actually end up
   running"). See REGISTRY_TAG_WALK_SPEC.md's "Pull-target version" spec.
+  Alongside verified_current_version below, this is tri-state, not just
+  str | None: a real tag, version_detect.NO_RELEASE_MATCH (a real digest
+  search ran and genuinely found nothing — the pinned/running build is
+  ahead of any tagged release), or None (nothing was searched at all —
+  no digest, or no candidates). See _search_ranked_for_digest() and
+  tag_filter.classify_digest_search_result() for how that's decided, and
+  REGISTRY_TAG_WALK_SPEC.md's unreleased-build amendment for why the two
+  "nothing" cases used to be indistinguishable and needed separating.
 
 Deliberately on its own, much slower interval than UpdateCheckCoordinator
 (DEFAULT_TAG_WALK_INTERVAL — see below — vs. the digest check's 1h) — see
@@ -70,6 +78,7 @@ from .registry_client import RegistryAuthError, RegistryClient, RegistryError, R
 from .tag_filter import (
     TAG_EXCLUDE_LABEL,
     TAG_INCLUDE_LABEL,
+    classify_digest_search_result,
     filter_tags,
     is_not_behind,
     known_base_image_suffix,
@@ -78,6 +87,7 @@ from .tag_filter import (
     select_newest_version_tag,
 )
 from .update_coordinator import StackUpdateSummary, UpdateCheckCoordinator
+from .version_detect import NoReleaseMatch
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,7 +116,15 @@ PULL_TARGET_MAX_DIGEST_LOOKUPS = 15
 @dataclass
 class ServiceTagWalkStatus:
     latest_registry_tag: str | None = None
-    pull_target_version: str | None = None
+    # str: a real matching tag. NO_RELEASE_MATCH (version_detect.py): a
+    # real search ran against real ranked candidates and genuinely found
+    # no match (the running/pinned build is ahead of any tagged release
+    # — confirmed real case: onstar2mqtt, 20 commits ahead of v2.10.1 per
+    # GitHub's own compare view). None: nothing was searched at all (no
+    # pinned digest, or no candidates) — these two used to be
+    # indistinguishable; see REGISTRY_TAG_WALK_SPEC.md's unreleased-build
+    # amendment and tag_filter.py's classify_digest_search_result().
+    pull_target_version: str | NoReleaseMatch | None = None
     # Which candidate tag, if any, shares the *locally running* image's
     # digest right now — i.e. a live, verified answer to "what version is
     # actually running", for a service pinned to a floating tag (stable,
@@ -119,8 +137,9 @@ class ServiceTagWalkStatus:
     # UNVERIFIED_DETECTED_VERSION_SPEC.md's verified-current-version
     # amendment — distinct from (and preferred over) detect_version()'s
     # own assumed_version fallback, which is a stale, unverified snapshot
-    # from the last pull rather than a live digest match.
-    verified_current_version: str | None = None
+    # from the last pull rather than a live digest match. Same
+    # str/NO_RELEASE_MATCH/None tri-state as pull_target_version above.
+    verified_current_version: str | NoReleaseMatch | None = None
 
 
 class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWalkStatus]]]):
@@ -443,7 +462,7 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         ranked: list[str],
         target_digest: str,
         purpose: str,
-    ) -> str | None:
+    ) -> str | NoReleaseMatch | None:
         """Which candidate tag, if any, currently shares target_digest —
         shared by both pull_target_version's search (target_digest =
         the pinned tag's remote digest — "what you'd get if you pulled
@@ -459,15 +478,24 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
         twice. Searches in the order given (newest-first, per
         rank_final_versions()'s own tie-break, so the first match found
         is always the newest/most-specific one if more than one
-        candidate happens to share the digest). Returns None (never
-        guesses) if nothing matches within the given list — expected for
-        some projects (e.g. pinned to a tag whose current build has no
-        corresponding numbered version tag at all). `purpose` is only
-        for the per-candidate-failure debug log below, to tell the two
-        callers' log lines apart.
+        candidate happens to share the digest).
+
+        Three possible outcomes, decided by classify_digest_search_result()
+        (tag_filter.py, pure and independently tested) from this method's
+        own raw results — see REGISTRY_TAG_WALK_SPEC.md's unreleased-build
+        amendment: the matched tag; NO_RELEASE_MATCH if the search
+        genuinely ran (at least one candidate's digest was actually
+        fetched) and found nothing — expected for a project whose running
+        build is ahead of any tagged release; or None if `ranked` was
+        empty (nothing to search) or every single candidate's manifest
+        lookup failed (a degraded search that learned nothing, not a
+        confirmed non-match). `purpose` is only for the per-candidate-
+        failure debug log below, to tell the two callers' log lines apart.
         """
         repo = repo_name(image_ref)
 
+        matched: str | None = None
+        any_lookup_succeeded = False
         for tag in ranked:
             candidate_ref = f"{repo}:{tag}"
             try:
@@ -487,7 +515,9 @@ class TagWalkCoordinator(DataUpdateCoordinator[dict[str, dict[str, ServiceTagWal
                     err,
                 )
                 continue
+            any_lookup_succeeded = True
             if digest == target_digest:
-                return tag
+                matched = tag
+                break
 
-        return None
+        return classify_digest_search_result(ranked, matched, any_lookup_succeeded)

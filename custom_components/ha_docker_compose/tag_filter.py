@@ -23,7 +23,13 @@ import re
 
 from packaging.version import InvalidVersion, Version
 
-from .version_detect import NON_VERSION_TAGS, has_version_structure, is_version_tag
+from .version_detect import (
+    NO_RELEASE_MATCH,
+    NON_VERSION_TAGS,
+    NoReleaseMatch,
+    has_version_structure,
+    is_version_tag,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -426,3 +432,35 @@ def prioritize_by_suffix(ranked: list[str], pinned_suffix: str | None) -> list[s
     same_suffix = [t for t in ranked if known_base_image_suffix(t) == pinned_suffix]
     other = [t for t in ranked if known_base_image_suffix(t) != pinned_suffix]
     return same_suffix + other
+
+
+def classify_digest_search_result(
+    ranked: list[str], matched: str | None, any_lookup_succeeded: bool
+) -> str | NoReleaseMatch | None:
+    """Decide tag_walk_coordinator.py's _search_ranked_for_digest() return
+    value from its already-computed raw ingredients — the actual network
+    I/O and per-candidate try/except stays there; this is just the pure
+    decision extracted out so it's directly testable (this integration's
+    coordinators import homeassistant and can't be unit tested in this
+    repo's test environment — see tests/conftest.py).
+
+    - `matched`: the candidate tag whose digest matched, if any — wins
+      regardless of the other two arguments.
+    - Otherwise, an empty `ranked` means nothing was ever searched at all
+      (no candidates existed to check) — None, "nothing to compare",
+      exactly today's existing behavior.
+    - Otherwise, `any_lookup_succeeded` distinguishes a real, informative
+      zero-match (at least one candidate's digest was actually fetched
+      and compared, none matched — NO_RELEASE_MATCH, "genuinely
+      unreleased") from a degraded search where every single manifest
+      lookup errored out (e.g. a registry outage mid-search) — None, "we
+      don't actually know", never a false NO_RELEASE_MATCH claim. This
+      mirrors the module's existing under-matching bias (see module
+      docstring): a false "unreleased" would be exactly as misleading in
+      kind as a false "newer version found".
+    """
+    if matched is not None:
+        return matched
+    if not ranked:
+        return None
+    return NO_RELEASE_MATCH if any_lookup_succeeded else None

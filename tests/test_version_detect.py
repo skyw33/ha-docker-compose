@@ -1,4 +1,6 @@
 from ha_docker_compose.version_detect import (
+    NO_RELEASE_MATCH,
+    UNRELEASED_VERSION_LABEL,
     UNVERIFIED_SUFFIX,
     detect_version,
     has_version_structure,
@@ -276,6 +278,55 @@ def test_detect_version_falls_back_to_tag_when_label_is_arbitrary_non_version_wo
         "someimage:v4.2.0",
         image_labels={"org.opencontainers.image.version": "weekly"},
         container_labels=None,
+    )
+    assert result == "4.2.0"
+
+
+def test_detect_version_no_release_match_returns_unreleased_label() -> None:
+    """The new tri-state case: a live digest search ran and genuinely
+    found no matching released tag (NO_RELEASE_MATCH), as opposed to
+    None (no search attempted at all) — must render as
+    UNRELEASED_VERSION_LABEL, not be treated like a missing value."""
+    result = detect_version(
+        "onstar2mqtt:latest",
+        image_labels={"org.opencontainers.image.version": "weekly"},
+        container_labels=None,
+        verified_current_version=NO_RELEASE_MATCH,
+    )
+    assert result == UNRELEASED_VERSION_LABEL
+
+
+def test_detect_version_no_release_match_outranks_assumed_version() -> None:
+    """A proven live negative (the digest search ran and found nothing)
+    must win over an older, unverified assumed_version guess, not be
+    silently overridden by it — the same priority reasoning as a real
+    verified_current_version match outranking assumed_version."""
+    result = detect_version(
+        "onstar2mqtt:latest",
+        image_labels={},
+        container_labels=None,
+        verified_current_version=NO_RELEASE_MATCH,
+        assumed_version="v2.10.1",
+    )
+    assert result == UNRELEASED_VERSION_LABEL
+
+
+def test_detect_version_no_release_match_never_overrides_real_label() -> None:
+    result = detect_version(
+        "grocy/backend:v4.2.0",
+        image_labels={"org.opencontainers.image.version": "4.2.0"},
+        container_labels=None,
+        verified_current_version=NO_RELEASE_MATCH,
+    )
+    assert result == "4.2.0"
+
+
+def test_detect_version_no_release_match_never_overrides_real_tag() -> None:
+    result = detect_version(
+        "someimage:v4.2.0",
+        image_labels={},
+        container_labels=None,
+        verified_current_version=NO_RELEASE_MATCH,
     )
     assert result == "4.2.0"
 

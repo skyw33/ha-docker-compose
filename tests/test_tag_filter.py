@@ -1,6 +1,7 @@
 from ha_docker_compose.tag_filter import (
     KNOWN_BASE_IMAGE_SUFFIXES,
     _strip_known_base_image_suffix,
+    classify_digest_search_result,
     filter_tags,
     is_not_behind,
     is_real_version_tag,
@@ -9,6 +10,7 @@ from ha_docker_compose.tag_filter import (
     rank_final_versions,
     select_newest_version_tag,
 )
+from ha_docker_compose.version_detect import NO_RELEASE_MATCH
 
 
 def test_is_real_version_tag_accepts_bare_digit() -> None:
@@ -456,3 +458,51 @@ def test_rank_final_versions_docker_cli_real_world_tag_shape() -> None:
     pinned_suffix = known_base_image_suffix("29.8.1-cli")
     prioritized = prioritize_by_suffix(ranked, pinned_suffix)
     assert prioritized[0] == "29.8.1-cli"
+
+
+def test_classify_digest_search_result_matched_tag_wins() -> None:
+    assert classify_digest_search_result(["2.10.1", "2.10.0"], "2.10.1", True) == "2.10.1"
+
+
+def test_classify_digest_search_result_empty_ranked_is_case_a_nothing_to_search() -> None:
+    """Case (a): no candidates existed to search among at all — stays
+    None, the existing "nothing to compare" behavior, never
+    NO_RELEASE_MATCH. This is also the shape of the Gatus local_digest
+    gap from a *different*, separately-tracked investigation: whenever
+    there's no digest to search against in the first place,
+    _search_ranked_for_digest() is never even called (see
+    tag_walk_coordinator.py's `if local_digest:`/`if pinned_digest:`
+    guards) — this stays case (a) regardless of *why* the digest was
+    missing."""
+    assert classify_digest_search_result([], None, False) is None
+    assert classify_digest_search_result([], None, True) is None
+
+
+def test_classify_digest_search_result_exhausted_with_no_match_is_unreleased() -> None:
+    """Case (b): a real search ran (at least one candidate's digest was
+    actually fetched and compared) and genuinely found nothing — the
+    bounded-search-exhausted case."""
+    assert classify_digest_search_result(["2.10.1", "2.10.0"], None, True) is NO_RELEASE_MATCH
+
+
+def test_classify_digest_search_result_all_lookups_failed_stays_none() -> None:
+    """Every candidate's manifest lookup errored out (e.g. a registry
+    outage mid-search) — a degraded search that learned nothing, not a
+    confirmed non-match. Must stay None, never a false NO_RELEASE_MATCH
+    claim — the same under-matching bias this module applies everywhere
+    else (module docstring)."""
+    assert classify_digest_search_result(["2.10.1", "2.10.0"], None, False) is None
+
+
+def test_onstar2mqtt_real_world_ahead_of_latest_release_is_unreleased() -> None:
+    """End-to-end, modeled on the confirmed real onstar2mqtt case: pinned
+    to a floating tag, no usable version label ("weekly" — see
+    version_detect.py), the newest tagged release is v2.10.1, and
+    GitHub's own compare view confirms the running build is 20 commits
+    ahead of it — a real search against real ranked candidates, correctly
+    finding no digest match at all."""
+    tags = ["v2.10.1", "v2.10.0", "v2.9.0", "v2.8.4", "v2.8.2", "v2.8.1"]
+    ranked = rank_final_versions(tags)
+    assert ranked[0] == "v2.10.1"
+    result = classify_digest_search_result(ranked, None, True)
+    assert result is NO_RELEASE_MATCH

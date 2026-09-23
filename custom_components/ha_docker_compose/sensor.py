@@ -57,6 +57,7 @@ from .github_coordinator import GitHubReleaseCoordinator, ServiceMetadata
 from .github_release import GitHubRelease
 from .tag_walk_coordinator import ServiceTagWalkStatus, TagWalkCoordinator
 from .update_coordinator import ServiceUpdateStatus, UpdateCheckCoordinator
+from .version_detect import NO_RELEASE_MATCH, UNRELEASED_VERSION_LABEL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -726,9 +727,14 @@ class ServicePullTargetVersionSensor(_TagWalkServiceEntity, SensorEntity):
     service pinned to `latest`/`stable` may resolve to a version that
     lags behind latest_registry_tag; a service already pinned to a
     specific version tag should show that same version here (pulling
-    would be a no-op). Empty/unknown if no candidate tag's digest matches
-    within the bounded search this performs (tag_walk_coordinator.py) —
-    a real, expected outcome for some projects, never a guess."""
+    would be a no-op). Empty/unknown (native_value is None) only when
+    there was nothing to search at all (no pinned digest yet, or no
+    candidate tags) — see REGISTRY_TAG_WALK_SPEC.md's unreleased-build
+    amendment. When a real search ran against real candidates and
+    genuinely found no digest match — the running/pull-target build is
+    ahead of any tagged release, a real, expected outcome for some
+    projects — this shows UNRELEASED_VERSION_LABEL ("unreleased")
+    instead, never a guess either way."""
 
     _attr_icon = "mdi:target"
 
@@ -742,7 +748,11 @@ class ServicePullTargetVersionSensor(_TagWalkServiceEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         status = self._tag_walk_status
-        return status.pull_target_version if status else None
+        if status is None:
+            return None
+        if status.pull_target_version is NO_RELEASE_MATCH:
+            return UNRELEASED_VERSION_LABEL
+        return status.pull_target_version
 
 
 class ServiceLatestGithubReleaseSensor(CoordinatorEntity[GitHubReleaseCoordinator], SensorEntity):

@@ -63,6 +63,47 @@ _VERSION_STRUCTURE_RE = re.compile(r"^v?\d+(?:\.\d+)+")
 UNVERIFIED_SUFFIX = " (unverified)"
 
 
+class NoReleaseMatch:
+    """Sentinel, distinct from None: a live digest search ran against real
+    ranked candidate tags and genuinely found no match — as opposed to
+    None, meaning no search was even attempted (no digest to search
+    with, or no candidates to search among). Confirmed real case: GitHub's
+    own compare view shows onstar2mqtt's running build 20 commits ahead
+    of its newest tagged release (v2.10.1) — a real search against real
+    candidates, correctly finding nothing, not an absence of information.
+    See tag_filter.py's classify_digest_search_result() and
+    tag_walk_coordinator.py's _search_ranked_for_digest().
+
+    Deliberately falsy (__bool__ below), not a plain string living
+    directly in ServiceTagWalkStatus/detect_version()'s data — every
+    *existing* truthy check elsewhere (e.g. pull_jobs.py's
+    `if tag_walk_status.pull_target_version:` guard, used to pick an
+    assumed_version to persist) keeps treating this exactly like None —
+    the same safe default — without needing to be audited or touched.
+    Only the specific call sites that need to *render* this distinctly
+    (ServicePullTargetVersionSensor, detect_version() below) check for it
+    explicitly, by identity (`is NO_RELEASE_MATCH`), since identity is the
+    only thing distinguishing it from a falsy None in the first place.
+    """
+
+    def __repr__(self) -> str:
+        return "NO_RELEASE_MATCH"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+NO_RELEASE_MATCH = NoReleaseMatch()
+
+# The literal displayed value for NO_RELEASE_MATCH, shared by
+# detect_version() below and sensor.py's ServicePullTargetVersionSensor,
+# so both sensors ("Current version"/detected_version and "Pull target
+# version"/pull_target_version) that can carry this sentinel render it
+# identically — see REGISTRY_TAG_WALK_SPEC.md's unreleased-build
+# amendment for why these two are treated symmetrically.
+UNRELEASED_VERSION_LABEL = "unreleased"
+
+
 def is_version_tag(tag: str) -> bool:
     """A tag counts as a real version if it's not a known floating/named
     tag and starts with a digit (optionally preceded by a 'v')."""
@@ -101,7 +142,7 @@ def detect_version(
     *,
     stack_name: str = "",
     service_name: str = "",
-    verified_current_version: str | None = None,
+    verified_current_version: str | NoReleaseMatch | None = None,
     assumed_version: str | None = None,
 ) -> str | None:
     """Fallback chain, checked in order:
@@ -121,16 +162,24 @@ def detect_version(
        label nor the tag itself has one to parse — returned verbatim, no
        UNVERIFIED_SUFFIX, since a digest match is a proven fact, not an
        assumption, exactly like a real pin would be.
-    4. Strictly last resort, and only if every check above returns
+    4. `NO_RELEASE_MATCH` — a distinct case of `verified_current_version`,
+       checked immediately after step 3 (which only handles a real,
+       truthy match): the same live digest search ran, but genuinely
+       found no matching released tag at all, meaning the running build
+       is ahead of any tagged release. Returns UNRELEASED_VERSION_LABEL
+       ("unreleased"), checked *before* assumed_version — a proven live
+       negative outranks an older, unverified guess, rather than being
+       silently overridden by it.
+    5. Strictly last resort, and only if every check above returns
        nothing — `assumed_version`, a persisted snapshot of
        `latest_registry_tag` from the moment of the most recent
        successful pull (see pull_jobs.py/storage.py). Deliberately
-       weaker than step 3 and checked after it: an assumption (pulling a
-       floating tag usually, by convention, lands on the same build as
-       the newest published tag, but this was never proven the way a
-       digest match is) rather than a verified fact, and marked with
-       UNVERIFIED_SUFFIX in the returned value so it's never mistaken
-       for one.
+       weaker than steps 3/4 and checked after them: an assumption
+       (pulling a floating tag usually, by convention, lands on the same
+       build as the newest published tag, but this was never proven the
+       way a digest match is) rather than a verified fact, and marked
+       with UNVERIFIED_SUFFIX in the returned value so it's never
+       mistaken for one.
 
     Returns None (never raises) if nothing at all is available — that's
     the expected outcome for some images on a floating tag with no
@@ -194,6 +243,20 @@ def detect_version(
             verified_current_version,
         )
         return verified_current_version
+
+    if verified_current_version is NO_RELEASE_MATCH:
+        _LOGGER.debug(
+            "detect_version(%s/%s): no '%s' label and tag '%s' doesn't look like a version — "
+            "a live digest search ran and found no matching released tag at all (running build "
+            "is ahead of any tagged release) — showing %r rather than falling through to a "
+            "weaker, unverified assumed_version guess",
+            stack_name,
+            service_name,
+            OCI_VERSION_LABEL,
+            image_tag,
+            UNRELEASED_VERSION_LABEL,
+        )
+        return UNRELEASED_VERSION_LABEL
 
     if assumed_version:
         _LOGGER.debug(
